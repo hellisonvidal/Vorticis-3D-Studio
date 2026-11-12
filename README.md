@@ -1,6 +1,10 @@
 # Vorticis 3D Studio
 
-App Android que cria modelos 3D **a partir de uma ou várias fotos** ou de **instruções em português**, e exporta em **12 formatos**. Tudo roda **no próprio celular**, sem servidor e sem internet.
+App Android que cria modelos 3D **a partir de uma foto, de várias fotos ou de um vídeo curto** ou de **instruções em português**, e exporta em **12 formatos**. Tudo roda **no próprio celular**, sem servidor e sem internet.
+
+## Atualizações
+A partir da versão 1.1, o app verifica sozinho se há versão nova (a cada 6 h, ou no menu ⋮ → **Verificar atualização**), baixa o APK e abre o instalador. Na primeira vez, o Android pede para permitir "instalar apps desconhecidos" para o Vorticis.
+As versões seguem o padrão **1.1.N**, em que N é o número do build no GitHub Actions.
 
 ## Instalar no celular (sem computador)
 
@@ -35,6 +39,17 @@ Depois da primeira foto, toque em **"+ Ângulo"** e fotografe andando **para a s
 - Técnica: **casco visual** (*shape-from-silhouette*). Cada silhueta esculpe o volume, e a superfície é extraída com *Surface Nets* sobre um campo de distância com sinal. O resultado é uma malha lisa e fechada. A textura é montada projetando as próprias fotos de volta no modelo (frente com a foto da frente, verso com a de trás).
 - Opções na tela: "Ao redor (360°)", "Ao redor (sentido inverso)" (se você andou para a esquerda), "Frente / lado / trás" e "Só a 1ª foto". Por voz ou texto: *"fotos no sentido inverso"*.
 - Limitação do método: cavidades que nenhuma silhueta mostra (o interior de uma caneca, por exemplo) ficam preenchidas.
+
+### 1c. Vídeo → 3D
+Grave (ou escolha) um vídeo de 10 a 20 s dando **uma volta** ao redor do objeto, ou girando o objeto parado na frente da câmera. O app:
+1. extrai ~30 quadros, corrigindo a rotação do vídeo;
+2. recorta o objeto em cada quadro;
+3. **descobre sozinho onde a volta de 360° termina**, comparando a silhueta e as cores de cada quadro com as do primeiro;
+4. usa até 12 quadros dessa volta no casco visual.
+
+### Recorte do objeto
+- **ML Kit Subject Segmentation** (rede neural do Google, no aparelho). O app pede ao Play Services para baixar o modelo logo na primeira abertura e, se preciso, espera o download antes de recortar.
+- Sem o ML Kit, entra o recorte próprio estilo **GrabCut**: misturas de gaussianas de cor para objeto e fundo, prioridade ao centro e suavização regional. Num teste com fundo movimentado (piso, vitrine, planta), a sobreposição com o recorte correto subiu de 21% (método antigo) para 86%.
 
 ### 2. Texto → 3D (a "IA própria")
 A **Vorticis Mind** é um interpretador de linguagem natural (PT-BR e EN) que roda offline. Ela entende:

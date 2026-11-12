@@ -16,8 +16,14 @@ import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import com.vorticis.studio3d.core.mind.TextRasterizer
 import com.vorticis.studio3d.core.photo.Mask
 import com.vorticis.studio3d.core.photo.Segmentation
+import android.media.MediaMetadataRetriever
+import android.os.Build
+import com.google.android.gms.common.moduleinstall.ModuleInstall
+import com.google.android.gms.common.moduleinstall.ModuleInstallRequest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 
 /** Foto carregada + máscara do objeto. */
@@ -52,6 +58,76 @@ object PhotoLoader {
         return if (bmp.config == Bitmap.Config.ARGB_8888) bmp else bmp.copy(Bitmap.Config.ARGB_8888, false)
     }
 
+    private fun segmenterClient() = SubjectSegmentation.getClient(
+        SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build()
+    )
+
+    /** O modelo de recorte do ML Kit já está no aparelho? */
+    suspend fun isModelReady(context: Context): Boolean = try {
+        val c = segmenterClient()
+        try { ModuleInstall.getClient(context).areModulesAvailable(c).await().areModulesAvailable() } finally { c.close() }
+    } catch (_: Throwable) { false }
+
+    /**
+     * Pede ao Google Play Services para baixar o modelo de recorte (uma vez só).
+     * Espera até [waitMs]; retorna true se o modelo ficou pronto.
+     */
+    suspend fun ensureModel(context: Context, waitMs: Long = 0): Boolean {
+        if (isModelReady(context)) return true
+        try {
+            val c = segmenterClient()
+            try {
+                val req = ModuleInstallRequest.newBuilder().addApi(c).build()
+                val resp = ModuleInstall.getClient(context).installModules(req).await()
+                if (resp.areModulesAlreadyInstalled()) return true
+            } finally { c.close() }
+        } catch (_: Throwable) { return false }
+        if (waitMs <= 0) return false
+        return withTimeoutOrNull(waitMs) {
+            while (!isModelReady(context)) delay(1500)
+            true
+        } ?: false
+    }
+
+    /**
+     * Extrai quadros igualmente espaçados de um vídeo (corrigindo a rotação),
+     * limitando o maior lado em [maxSide].
+     */
+    fun videoFrames(context: Context, uri: Uri, count: Int = 30, maxSide: Int = 560, progress: (Int, Int) -> Unit = { _, _ -> }): List<Bitmap> {
+        val r = MediaMetadataRetriever()
+        try {
+            r.setDataSource(context, uri)
+            val durMs = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: error("Vídeo sem duração")
+            val rot = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            val vw = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val vh = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            val n = count.coerceIn(8, 48)
+            val out = ArrayList<Bitmap>()
+            for (i in 0 until n) {
+                progress(i + 1, n)
+                val tUs = (durMs * 1000L * i) / n
+                var bmp = (if (Build.VERSION.SDK_INT >= 27)
+                    r.getScaledFrameAtTime(tUs, MediaMetadataRetriever.OPTION_CLOSEST, maxSide, maxSide)
+                else r.getFrameAtTime(tUs, MediaMetadataRetriever.OPTION_CLOSEST)) ?: continue
+                // alguns aparelhos devolvem o quadro sem aplicar a rotação do vídeo
+                val landscapeSrc = vw >= vh
+                val frameLandscape = bmp.width >= bmp.height
+                if ((rot == 90 || rot == 270) && landscapeSrc == frameLandscape) {
+                    bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
+                } else if (rot == 180) {
+                    bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, Matrix().apply { postRotate(180f) }, true)
+                }
+                val sc = maxSide.toFloat() / max(bmp.width, bmp.height)
+                if (sc < 1f) bmp = Bitmap.createScaledBitmap(bmp, (bmp.width * sc).toInt(), (bmp.height * sc).toInt(), true)
+                out += if (bmp.config == Bitmap.Config.ARGB_8888) bmp else bmp.copy(Bitmap.Config.ARGB_8888, false)
+            }
+            if (out.size < 4) error("Não consegui ler quadros suficientes do vídeo")
+            return out
+        } finally {
+            r.release()
+        }
+    }
+
     /**
      * Separa o objeto do fundo: primeiro com o ML Kit (rede neural do Google, no aparelho);
      * se indisponível, usa o algoritmo próprio do Vorticis.
@@ -62,9 +138,7 @@ object PhotoLoader {
         bitmap.getPixels(px, 0, w, 0, 0, w, h)
         val ml: Mask? = try {
             withTimeout(20_000) {
-                val client = SubjectSegmentation.getClient(
-                    SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build()
-                )
+                val client = segmenterClient()
                 try {
                     val res = client.process(InputImage.fromBitmap(bitmap, 0)).await()
                     val buf = res.foregroundConfidenceMask ?: return@withTimeout null
@@ -80,7 +154,7 @@ object PhotoLoader {
         return if (ml != null && ml.area > w * h / 200) {
             PhotoInput(px, w, h, Segmentation.largestComponent(Segmentation.fillHoles(ml)), "IA de segmentação (ML Kit)")
         } else {
-            PhotoInput(px, w, h, Segmentation.auto(px, w, h), "segmentação própria do Vorticis")
+            PhotoInput(px, w, h, Segmentation.auto(px, w, h), "o recorte próprio do Vorticis (a IA do Google ainda está sendo baixada pelo Play Services)")
         }
     }
 }

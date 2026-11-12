@@ -28,9 +28,9 @@ data class PhotoOptions(
     /** multiplicador de espessura (1 = natural) */
     val thickness: Float = 1f,
     /** detalhe de superfície vindo da luminosidade (0..1) */
-    val detail: Float = 0.25f,
+    val detail: Float = 0.12f,
     /** resolução da grade no maior lado */
-    val resolution: Int = 150,
+    val resolution: Int = 190,
     /** altura final do objeto em unidades (metros) */
     val targetSize: Float = 1.2f,
 )
@@ -104,7 +104,7 @@ object PhotoTo3D {
     }
 
     fun build(pixels: IntArray, w: Int, h: Int, maskIn: Mask, opt: PhotoOptions = PhotoOptions()): PhotoResult {
-        val mask = if (maskIn.w != w || maskIn.h != h) maskIn.resize(w, h) else maskIn
+        val mask = smoothOutline(if (maskIn.w != w || maskIn.h != h) maskIn.resize(w, h) else maskIn)
         var mode = opt.mode
         var why = ""
         if (mode == PhotoMode.AUTO) {
@@ -120,6 +120,16 @@ object PhotoTo3D {
             else -> gridSolid(pixels, w, mask, bb, opt, extrude = false)
         }
         return PhotoResult(mesh, material, mode, why)
+    }
+
+    /** Suaviza o contorno da máscara (remove serrilhado e pontas finas do recorte). */
+    fun smoothOutline(m: Mask): Mask {
+        val r = max(2, min(m.w, m.h) / 90)
+        val f = FloatArray(m.w * m.h) { if (m.data[it]) 1f else 0f }
+        val b = boxBlur(boxBlur(f, m.w, m.h, r), m.w, m.h, r)
+        val out = Mask(m.w, m.h)
+        for (i in b.indices) out.data[i] = b[i] > 0.5f
+        return Segmentation.largestComponent(Segmentation.fillHoles(out)).takeIf { it.area > m.area / 3 } ?: m
     }
 
     private fun crop(pixels: IntArray, w: Int, bb: IntArray): Texture {

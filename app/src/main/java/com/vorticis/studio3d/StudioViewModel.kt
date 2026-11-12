@@ -1,6 +1,7 @@
 package com.vorticis.studio3d
 
 import android.app.Application
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.runtime.getValue
@@ -20,13 +21,16 @@ import com.vorticis.studio3d.core.photo.CaptureLayout
 import com.vorticis.studio3d.core.photo.MultiView
 import com.vorticis.studio3d.core.photo.MultiViewOptions
 import com.vorticis.studio3d.core.photo.PhotoMode
-import com.vorticis.studio3d.core.photo.PhotoView
 import com.vorticis.studio3d.core.photo.PhotoOptions
 import com.vorticis.studio3d.core.photo.PhotoTo3D
+import com.vorticis.studio3d.core.photo.PhotoView
+import com.vorticis.studio3d.core.photo.VideoLoop
 import com.vorticis.studio3d.export.ExportManager
 import com.vorticis.studio3d.photo.AndroidTextRasterizer
 import com.vorticis.studio3d.photo.PhotoInput
 import com.vorticis.studio3d.photo.PhotoLoader
+import com.vorticis.studio3d.update.AppUpdater
+import com.vorticis.studio3d.update.UpdateInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -40,14 +44,19 @@ data class ChatMessage(val fromUser: Boolean, val text: String)
 
 sealed interface UiEvent {
     data class Share(val intent: Intent) : UiEvent
+    data class Launch(val intent: Intent) : UiEvent
     data class Snack(val text: String, val share: ExportFile? = null) : UiEvent
     data object OpenCamera : UiEvent
     data object OpenExport : UiEvent
 }
 
+/** De onde veio o modelo atual (define as sugestões da conversa). */
+enum class Source { NONE, TEXT, PHOTO, MULTI, VIDEO }
+
 class StudioViewModel(app: Application) : AndroidViewModel(app) {
 
     private val mind = VorticisMind(AndroidTextRasterizer())
+    private val prefs = app.getSharedPreferences("vorticis", Context.MODE_PRIVATE)
 
     var scene by mutableStateOf(Scene())
         private set
@@ -57,18 +66,27 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var hasPhoto by mutableStateOf(false)
         private set
-    /** quantas fotos (ângulos) estão na sessão atual */
     var photoCount by mutableStateOf(0)
         private set
     var captureLayout by mutableStateOf(CaptureLayout.AROUND)
+        private set
+    var source by mutableStateOf(Source.NONE)
         private set
     var canUndo by mutableStateOf(false)
         private set
     var canRedo by mutableStateOf(false)
         private set
+    var update by mutableStateOf<UpdateInfo?>(null)
+        private set
+    var updateProgress by mutableStateOf<Float?>(null)
+        private set
+    var segmentationReady by mutableStateOf(false)
+        private set
 
     val messages = mutableStateListOf(
-        ChatMessage(false, "Olá! Sou a Vorticis Mind. Descreva o que quer criar (\"um foguete vermelho com 4 aletas\") ou tire uma foto de um objeto. Tudo roda no seu celular."),
+        ChatMessage(false, "Oi! 👋 Eu sou a Vorticis Mind e transformo ideias em 3D, aqui mesmo no seu celular.\n\n" +
+            "• Escreva o que quer criar, ex.: \"foguete vermelho com 3 aletas\"\n" +
+            "• Ou toque em ＋ para usar foto, várias fotos ou vídeo."),
     )
 
     private val events = Channel<UiEvent>(Channel.BUFFERED)
@@ -80,19 +98,37 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
     private val photo: PhotoInput? get() = photos.firstOrNull()
     private var photoThickness = 1f
 
-    val suggestions = listOf(
-        "mesa redonda de madeira com 4 cadeiras",
-        "casa azul de 2 andares com telhado vermelho",
-        "foguete vermelho com 3 aletas",
-        "texto 'VORTICIS' dourado",
-        "esfera dourada em cima de um cubo de mármore",
-        "árvore low poly",
-        "castelo com 6 torres",
-        "pinte de verde",
-        "deixe 2 vezes maior",
-        "gire 45 graus",
-        "ajuda",
-    )
+    init {
+        // baixa a IA de recorte do Google em segundo plano, na primeira abertura
+        viewModelScope.launch {
+            segmentationReady = PhotoLoader.ensureModel(getApplication())
+        }
+        // verifica atualização no máximo a cada 6 horas
+        val last = prefs.getLong("lastUpdateCheck", 0)
+        if (System.currentTimeMillis() - last > 6 * 3600_000L) checkUpdate(silent = true)
+    }
+
+    /** Sugestões que mudam conforme o que está na tela. */
+    val suggestions: List<String>
+        get() = when {
+            scene.isEmpty -> listOf(
+                "mesa redonda de madeira com 4 cadeiras", "foguete vermelho com 3 aletas", "casa azul com telhado vermelho",
+                "texto 'OLÁ' dourado", "castelo com 6 torres", "esfera dourada em cima de um cubo de mármore", "o que você sabe fazer?",
+            )
+            source == Source.PHOTO -> listOf(
+                "foto com mais volume", "foto com menos volume", "transforme a foto em vaso", "foto em relevo",
+                "extrusão da foto", "pinte de dourado", "exportar",
+            )
+            source == Source.MULTI || source == Source.VIDEO -> listOf(
+                "fotos no sentido inverso", "suavize", "pinte de dourado", "deixe 2 vezes maior", "exportar",
+            )
+            else -> listOf(
+                "pinte de azul", "deixe 2 vezes maior", "gire 45 graus", "deixe low poly", "adicione uma árvore ao lado",
+                "duplique", "desfazer", "exportar",
+            )
+        }
+
+    private fun say(text: String) { messages += ChatMessage(false, text) }
 
     private fun commit(s: Scene) {
         while (history.size > historyIndex + 1) history.removeAt(history.size - 1)
@@ -116,6 +152,7 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         if (historyIndex < history.size - 1) { historyIndex++; scene = history[historyIndex]; updateHistoryFlags() }
     }
 
+    // ------------------------------------------------------------------ conversa
     fun send(text: String) {
         val t = text.trim()
         if (t.isEmpty() || busy != null) return
@@ -124,65 +161,107 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val res = withContext(Dispatchers.Default) { mind.interpret(t, scene) }
-                messages += ChatMessage(false, res.message)
                 when (res.special) {
-                    Special.UNDO -> undo()
-                    Special.REDO -> redo()
-                    Special.EXPORT -> events.send(UiEvent.OpenExport)
-                    Special.PHOTO_REQUEST -> events.send(UiEvent.OpenCamera)
-                    else -> {}
+                    Special.UNDO -> { undo(); say(if (canUndo || canRedo) "Pronto, voltei um passo. ↩️" else "Não há o que desfazer.") }
+                    Special.REDO -> { redo(); say("Refeito. ↪️") }
+                    Special.EXPORT -> { say("Abrindo a exportação: escolha um formato ou exporte todos de uma vez. 📦"); events.send(UiEvent.OpenExport) }
+                    Special.PHOTO_REQUEST -> { say("Abrindo a câmera. 📷"); events.send(UiEvent.OpenCamera) }
+                    else -> say(res.message)
                 }
                 val requestedMode = res.photoMode
                 if (requestedMode != null) {
                     if (photo == null) {
-                        messages += ChatMessage(false, "Ainda não há foto. Toque no botão da câmera ou da galeria primeiro.")
+                        say("Ainda não tenho uma foto. Toque em ＋ e escolha Câmera, Galeria ou Vídeo.")
                     } else {
                         res.photoThickness?.let { photoThickness = (photoThickness * it).coerceIn(0.3f, 3f) }
                         res.photoLayout?.let { captureLayout = it }
                         rebuildPhoto(if (requestedMode == PhotoMode.MULTIVIEW && photos.size < 2) photoMode else requestedMode)
                     }
-                } else if (res.changed) commit(res.scene)
+                } else if (res.changed && res.special == null) {
+                    commit(res.scene)
+                    if (source == Source.NONE || res.scene.nodes.none { it.kind == "foto" }) source = if (res.scene.isEmpty) Source.NONE else Source.TEXT
+                }
             } catch (e: Throwable) {
-                messages += ChatMessage(false, "Ops, algo deu errado: ${e.message ?: e.javaClass.simpleName}")
+                say("Ops, algo deu errado: ${e.message ?: e.javaClass.simpleName}")
             } finally {
                 busy = null
             }
         }
     }
 
-    /** Uma foto: [append] = true acrescenta um ângulo à sessão atual (várias fotos). */
+    // ------------------------------------------------------------------ fotos
+    /** Uma foto: [append] = true acrescenta um ângulo à sessão atual. */
     fun onPhoto(uri: Uri, append: Boolean = false) = onPhotos(listOf(uri), append)
 
-    /** Uma ou várias fotos (galeria com seleção múltipla ou "+ Ângulo"). */
+    private suspend fun segmentAll(bitmaps: List<android.graphics.Bitmap>, label: String): List<PhotoInput> {
+        if (!segmentationReady) {
+            busy = "Baixando a IA de recorte (só na 1ª vez)…"
+            segmentationReady = PhotoLoader.ensureModel(getApplication(), waitMs = 25_000)
+        }
+        val out = ArrayList<PhotoInput>()
+        for ((i, b) in bitmaps.withIndex()) {
+            busy = if (bitmaps.size > 1) "Recortando $label ${i + 1} de ${bitmaps.size}…" else "Separando o objeto do fundo…"
+            out += withContext(Dispatchers.Default) { PhotoLoader.segment(b) }
+            b.recycle()
+        }
+        return out
+    }
+
+    /** Uma ou várias fotos (galeria com seleção múltipla, compartilhamento ou "+ Ângulo"). */
     fun onPhotos(uris: List<Uri>, append: Boolean = false) {
         if (busy != null || uris.isEmpty()) return
         val list = uris.take(16)
-        busy = "Analisando ${if (list.size > 1) "${list.size} fotos" else "a foto"}…"
-        messages += ChatMessage(true, if (list.size > 1) "📷 ${list.size} fotos enviadas" else if (append) "📷 Novo ângulo" else "📷 Foto enviada")
+        busy = "Abrindo ${if (list.size > 1) "${list.size} fotos" else "a foto"}…"
+        messages += ChatMessage(true, if (list.size > 1) "📷 ${list.size} fotos" else if (append) "📷 Novo ângulo" else "📷 Foto")
         viewModelScope.launch {
             try {
-                val inputs = ArrayList<PhotoInput>()
-                for ((i, uri) in list.withIndex()) {
-                    busy = if (list.size > 1) "Recortando foto ${i + 1} de ${list.size}…" else "Separando o objeto do fundo…"
-                    inputs += withContext(Dispatchers.IO) {
-                        val bmp = PhotoLoader.load(getApplication(), uri)
-                        PhotoLoader.segment(bmp).also { bmp.recycle() }
-                    }
-                }
+                val bitmaps = withContext(Dispatchers.IO) { list.map { PhotoLoader.load(getApplication(), it) } }
+                val inputs = segmentAll(bitmaps, "foto")
                 if (!append) { photos.clear(); photoThickness = 1f }
                 photos += inputs
                 if (photos.size > 16) photos.subList(0, photos.size - 16).clear()
                 hasPhoto = true
                 photoCount = photos.size
-                val how = inputs.map { it.segmentedBy }.distinct().joinToString(" e ")
-                messages += ChatMessage(false, "Recortei ${if (inputs.size > 1) "${inputs.size} fotos" else "o objeto"} usando $how.")
-                if (photos.size >= 2) rebuildPhoto(PhotoMode.MULTIVIEW)
-                else {
+                say("Recortei ${if (inputs.size > 1) "${inputs.size} fotos" else "o objeto"} usando ${inputs.map { it.segmentedBy }.distinct().joinToString(" e ")}.")
+                if (photos.size >= 2) {
+                    rebuildPhoto(PhotoMode.MULTIVIEW)
+                } else {
                     rebuildPhoto(if (photoMode == PhotoMode.MULTIVIEW) PhotoMode.AUTO else photoMode)
-                    messages += ChatMessage(false, "Quer o objeto inteiro, com o verso real? Toque em \"+ Ângulo\" e fotografe andando para a SUA DIREITA ao redor dele (mesma distância e altura): 4 fotos (frente, lado, trás, outro lado) ou 8 em volta.")
+                    say("💡 Para o objeto inteiro, com o verso real: toque em \"+ Ângulo\" e fotografe andando para a SUA DIREITA ao redor dele, na mesma distância e altura. 4 fotos (frente, lado, trás, outro lado) ou 8 em volta. Ou grave um vídeo dando a volta.")
                 }
             } catch (e: Throwable) {
-                messages += ChatMessage(false, "Não consegui processar a foto: ${e.message ?: e.javaClass.simpleName}")
+                say("Não consegui processar a foto: ${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                busy = null
+            }
+        }
+    }
+
+    /** Vídeo curto dando uma volta no objeto (ou o objeto girando na frente da câmera). */
+    fun onVideo(uri: Uri) {
+        if (busy != null) return
+        busy = "Lendo o vídeo…"
+        messages += ChatMessage(true, "🎬 Vídeo")
+        viewModelScope.launch {
+            try {
+                val frames = withContext(Dispatchers.IO) {
+                    PhotoLoader.videoFrames(getApplication(), uri, count = 30) { i, n -> busy = "Extraindo quadro $i de $n…" }
+                }
+                val inputs = segmentAll(frames, "quadro")
+                busy = "Procurando a volta completa…"
+                val plan = withContext(Dispatchers.Default) {
+                    VideoLoop.plan(inputs.map { PhotoView(it.pixels, it.width, it.height, it.mask) })
+                }
+                photos.clear(); photoThickness = 1f
+                photos += plan.frames.map { inputs[it] }
+                hasPhoto = true
+                photoCount = photos.size
+                captureLayout = if (captureLayout == CaptureLayout.ORTHO) CaptureLayout.AROUND else captureLayout
+                say(plan.explanation(inputs.size))
+                rebuildPhoto(PhotoMode.MULTIVIEW)
+                source = Source.VIDEO
+            } catch (e: Throwable) {
+                say("Não consegui usar o vídeo: ${e.message ?: e.javaClass.simpleName}")
             } finally {
                 busy = null
             }
@@ -192,27 +271,22 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
     fun selectPhotoMode(mode: PhotoMode) {
         photoMode = mode
         if (photo != null && busy == null) {
-            viewModelScope.launch {
-                try { rebuildPhoto(mode) } finally { busy = null }
-            }
+            viewModelScope.launch { try { rebuildPhoto(mode) } finally { busy = null } }
         }
     }
 
     fun selectCaptureLayout(layout: CaptureLayout) {
         captureLayout = layout
         if (photos.size >= 2 && busy == null) {
-            viewModelScope.launch {
-                try { rebuildPhoto(PhotoMode.MULTIVIEW) } finally { busy = null }
-            }
+            viewModelScope.launch { try { rebuildPhoto(PhotoMode.MULTIVIEW) } finally { busy = null } }
         }
     }
 
-    /** Remove o último ângulo adicionado. */
     fun removeLastPhoto() {
         if (photos.size <= 1 || busy != null) return
         photos.removeAt(photos.size - 1)
         photoCount = photos.size
-        messages += ChatMessage(false, "Removi a última foto. Agora são ${photos.size}.")
+        say("Tirei a última foto. Agora são ${photos.size}.")
         viewModelScope.launch {
             try { rebuildPhoto(if (photos.size >= 2) PhotoMode.MULTIVIEW else PhotoMode.AUTO) } finally { busy = null }
         }
@@ -230,11 +304,13 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         }
         val node = Node("Foto_${result.mode.name.lowercase()}", result.mesh, result.material, 1, "foto", "corpo")
         commit(Scene(listOf(node), nextGroup = 2))
-        val tip = if (multi) "Se o formato ficou estranho, confira o sentido da volta nos botões abaixo, ou adicione mais ângulos."
-        else "Diga \"pinte de azul\", \"mais volume\" ou troque o modo abaixo."
-        messages += ChatMessage(false, "${result.explanation} (${result.mesh.triangleCount} triângulos). $tip")
+        if (source != Source.VIDEO || !multi) source = if (multi) Source.MULTI else Source.PHOTO
+        val tip = if (multi) "Se o formato ficou estranho, confira o sentido da volta nos botões abaixo do modelo."
+        else "Experimente os modos abaixo do modelo ou diga \"foto com mais volume\"."
+        say("✨ ${result.explanation}\n$tip")
     }
 
+    // ------------------------------------------------------------------ exportação
     private fun baseName(): String {
         val kind = scene.nodes.firstOrNull()?.kind ?: "modelo"
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
@@ -274,6 +350,48 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clear() {
         commit(Scene(nextGroup = scene.nextGroup))
-        messages += ChatMessage(false, "Cena limpa.")
+        source = Source.NONE
+        say("Cena limpa. O que vamos criar agora? 🧊")
+    }
+
+    // ------------------------------------------------------------------ atualização
+    fun checkUpdate(silent: Boolean = false) {
+        viewModelScope.launch {
+            try {
+                val info = withContext(Dispatchers.IO) { AppUpdater.check() }
+                prefs.edit().putLong("lastUpdateCheck", System.currentTimeMillis()).apply()
+                update = info
+                if (info == null && !silent) events.send(UiEvent.Snack("Você já está na versão mais recente (${AppUpdater.currentVersionName})."))
+            } catch (e: Throwable) {
+                if (!silent) events.send(UiEvent.Snack("Não consegui verificar atualizações: ${e.message ?: "sem internet?"}"))
+            }
+        }
+    }
+
+    fun dismissUpdate() { update = null }
+
+    fun installUpdate() {
+        val info = update ?: return
+        val ctx = getApplication<Application>()
+        if (AppUpdater.needsInstallPermission(ctx)) {
+            viewModelScope.launch {
+                events.send(UiEvent.Snack("Permita \"instalar apps desconhecidos\" para o Vorticis e toque em Atualizar de novo."))
+                events.send(UiEvent.Launch(AppUpdater.permissionIntent(ctx)))
+            }
+            return
+        }
+        if (updateProgress != null) return
+        updateProgress = 0f
+        viewModelScope.launch {
+            try {
+                val apk = withContext(Dispatchers.IO) { AppUpdater.download(ctx, info) { p -> updateProgress = p } }
+                update = null
+                events.send(UiEvent.Launch(AppUpdater.installIntent(ctx, apk)))
+            } catch (e: Throwable) {
+                events.send(UiEvent.Snack("Falha ao baixar a atualização: ${e.message ?: e.javaClass.simpleName}"))
+            } finally {
+                updateProgress = null
+            }
+        }
     }
 }

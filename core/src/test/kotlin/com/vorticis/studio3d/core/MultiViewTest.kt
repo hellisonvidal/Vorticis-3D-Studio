@@ -90,11 +90,30 @@ class MultiViewTest {
             val tex = r.material.texture!!
             val front = tex.sample(0.01f, 0.5f); val back = tex.sample(0.5f, 0.5f)
             assertTrue(channel(front, 16) > channel(front, 0), "frente vermelha ($name)")
-            assertTrue(channel(back, 0) > channel(back, 16), "verso azul ($name)")
+            // o verso só tem cor real se alguma foto o viu (com 2 fotos, frente + lado, não há)
+            if (angles.any { kotlin.math.abs(((it % 360) + 360) % 360 - 180f) <= 60f }) assertTrue(channel(back, 0) > channel(back, 16), "verso azul ($name)")
             if (name == "8fotos") {
                 val dir = File(out, "multivista").apply { mkdirs() }
                 for (fmt in ExportFormat.entries) for (f in Exporters.exportFiles(Scene(listOf(node)), fmt, "multivista")) File(dir, f.name).writeBytes(f.bytes)
             }
         }
+    }
+
+    @Test fun videoFindsFullTurn() {
+        // "vídeo" de 1 volta e 1/4 (0° a 450°), 1 quadro a cada 15°
+        val frames = (0..30).map { shoot(it * 15f) }
+        val plan = com.vorticis.studio3d.core.photo.VideoLoop.plan(frames)
+        println("vídeo: " + plan.explanation(frames.size) + " quadros=" + plan.frames)
+        assertTrue(plan.detected, "volta detectada")
+        assertTrue(plan.loopLength in 23..25, "volta em ~24 quadros (360°): ${plan.loopLength}")
+        val r = MultiView.build(plan.frames.map { frames[it] })
+        val b = r.mesh.bounds()
+        println("vídeo -> tamanho=%.2f x %.2f x %.2f".format(b.sizeX, b.sizeY, b.sizeZ))
+        assertTrue(b.sizeZ / b.sizeX < 0.6f)
+        // vídeo de exatamente uma volta sem repetição: usa o vídeo inteiro
+        val oneTurn = (0 until 24).map { shoot(it * 15f) }
+        val p2 = com.vorticis.studio3d.core.photo.VideoLoop.plan(oneTurn)
+        println("vídeo 360 exato: " + p2.explanation(oneTurn.size))
+        assertTrue(p2.loopLength >= 23)
     }
 }

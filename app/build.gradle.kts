@@ -4,6 +4,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Versão: 1.1.<número do build no GitHub Actions>. O app usa o versionCode para saber se há atualização.
+val buildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toInt()
+val versionBase = "1.1"
+
 android {
     namespace = "com.vorticis.studio3d"
     compileSdk = 35
@@ -12,8 +16,9 @@ android {
         applicationId = "com.vorticis.studio3d"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 100 + buildNumber
+        versionName = "$versionBase.$buildNumber"
+        buildConfigField("String", "UPDATE_REPO", "\"hellisonvidal/Vorticis-3D-Studio\"")
     }
 
     signingConfigs {
@@ -45,6 +50,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -79,4 +85,6 @@ dependencies {
 
     // Segmentação do objeto principal no aparelho (Google ML Kit, offline após baixar o módulo)
     implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
+    // ModuleInstall: força o download do modelo do ML Kit na primeira abertura
+    implementation("com.google.android.gms:play-services-base:18.5.0")
 }

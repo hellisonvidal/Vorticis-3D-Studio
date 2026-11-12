@@ -44,7 +44,11 @@ class Mask(val w: Int, val h: Int, val data: BooleanArray = BooleanArray(w * h))
  */
 object Segmentation {
 
-    fun auto(pixels: IntArray, w: Int, h: Int): Mask {
+    /** Recorte automático: GrabCut simplificado (modelos de cor objeto/fundo + prioridade ao centro). */
+    fun auto(pixels: IntArray, w: Int, h: Int): Mask = GrabCut.segment(pixels, w, h)
+
+    /** Modelo de fundo pelas cores da borda (usado como ponto de partida do GrabCut). */
+    fun borderModel(pixels: IntArray, w: Int, h: Int): Mask {
         // 1) cores de fundo: k-means (k=4) sobre os pixels da borda
         val border = ArrayList<FloatArray>()
         val step = max(1, (w + h) / 400)
