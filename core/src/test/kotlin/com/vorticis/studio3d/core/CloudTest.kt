@@ -43,7 +43,7 @@ class CloudTest {
         if (System.getenv("VORTICIS_CLOUD_TEST") != "1") { println("nuvem: teste pulado"); return }
         val img = File("../tools/probe/teste_foguete.png").readBytes()
         val t0 = System.currentTimeMillis()
-        val glb = CloudGenerator.generate(img, "image/png", System.getenv("HF_TOKEN")) { m, f -> println("  progresso: $m ${f ?: ""}") }
+        val glb = CloudGenerator.generate(img, "image/png", System.getenv("HF_TOKEN"), progress = { m, f -> println("  progresso: $m ${f ?: ""}") })
         val scene = GlbImporter.import(glb, decoder)
         println("nuvem: GLB ${glb.size} bytes em ${(System.currentTimeMillis() - t0) / 1000}s; ${scene.nodes.size} malhas, ${scene.triangleCount} triângulos, textura=${scene.nodes.any { it.material.texture != null }}")
         assertTrue(scene.triangleCount > 1000)
