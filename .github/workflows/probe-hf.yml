@@ -42,7 +42,7 @@ jobs:
       - name: Geração real pela nuvem grátis (cliente Kotlin do app)
         env:
           VORTICIS_CLOUD_TEST: "1"
-        run: ./gradlew :core:test --tests '*CloudTest*' --no-daemon -i | grep -E "nuvem:|progresso:|FAILED|Exception" || true
+        run: ./gradlew :core:test --tests '*CloudTest*' --no-daemon -i | grep -E "nuvem:|progresso:|FAILED|Exception|resposta bruta" || true
       - name: Publicar resultado para inspeção
         env:
           GH_TOKEN: ${{ github.token }}

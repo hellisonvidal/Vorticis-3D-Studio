@@ -48,6 +48,9 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -129,6 +132,8 @@ fun StudioScreen(vm: StudioViewModel) {
     var showAttach by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var showVideoTips by remember { mutableStateOf(false) }
+    var showCloud by remember { mutableStateOf(false) }
+    var showToken by remember { mutableStateOf(false) }
     var chatExpanded by rememberSaveable { mutableStateOf(false) }
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
     var videoUri by remember { mutableStateOf<Uri?>(null) }
@@ -202,6 +207,7 @@ fun StudioScreen(vm: StudioViewModel) {
                 is UiEvent.Launch -> try { context.startActivity(e.intent) } catch (_: Exception) { snack("Não foi possível abrir.") }
                 is UiEvent.OpenCamera -> openCamera(false)
                 is UiEvent.OpenExport -> showExport = true
+                is UiEvent.AskCloud -> if (vm.hasPhotoForCloud) showCloud = true else snack("Envie uma foto primeiro (toque em ＋).")
                 is UiEvent.Snack -> scope.launch {
                     val r = snackbar.showSnackbar(e.text, actionLabel = if (e.share != null) "Compartilhar" else null, duration = SnackbarDuration.Long)
                     if (r == SnackbarResult.ActionPerformed && e.share != null) vm.share(e.share)
@@ -241,6 +247,7 @@ fun StudioScreen(vm: StudioViewModel) {
                     IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "Mais opções") }
                     DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                         DropdownMenuItem(text = { Text("Como usar") }, leadingIcon = { Icon(Icons.Default.Info, null) }, onClick = { showMenu = false; showHelp = true })
+                        DropdownMenuItem(text = { Text("Nuvem grátis: token (opcional)") }, leadingIcon = { Icon(Icons.Default.Settings, null) }, onClick = { showMenu = false; showToken = true })
                         DropdownMenuItem(text = { Text("Verificar atualização") }, leadingIcon = { Icon(Icons.Default.Refresh, null) }, onClick = { showMenu = false; vm.checkUpdate() })
                         DropdownMenuItem(text = { Text("Limpar cena") }, leadingIcon = { Icon(Icons.Default.Delete, null) }, enabled = !vm.scene.isEmpty, onClick = { showMenu = false; vm.clear() })
                         HorizontalDivider()
@@ -298,7 +305,7 @@ fun StudioScreen(vm: StudioViewModel) {
                         }
                     }
                 }
-                if (vm.hasPhoto && !imeVisible && vm.cloud == null && vm.busy == null) PhotoControls(vm, Modifier.align(Alignment.BottomCenter), onAddCamera = { openCamera(true) }, onAddGallery = { openGallery(true) })
+                if (vm.hasPhoto && !imeVisible && vm.cloud == null && vm.busy == null) PhotoControls(vm, Modifier.align(Alignment.BottomCenter), onAddCamera = { openCamera(true) }, onAddGallery = { openGallery(true) }, onCloud = { showCloud = true })
             }
 
             // ------------------------------------------------ conversa
@@ -362,6 +369,47 @@ fun StudioScreen(vm: StudioViewModel) {
                     Text("Escolher da galeria")
                 }
             },
+        )
+    }
+
+    // ------------------------------------------------ nuvem grátis
+    if (showCloud) {
+        AlertDialog(
+            onDismissRequest = { showCloud = false },
+            icon = { Icon(Icons.Default.Star, null) },
+            title = { Text("Qualidade máxima na nuvem") },
+            text = {
+                Text(
+                    "Gera o modelo com o TRELLIS (IA de código aberto da Microsoft), que \"imagina\" os lados e as costas, como o Meshy e o Tripo.\n\n" +
+                        "• É grátis: roda no Hugging Face, numa GPU pública.\n" +
+                        "• Só o recorte do objeto é enviado (sem o fundo), e o envio é para um serviço público de terceiros. Não use fotos que você não queira compartilhar.\n" +
+                        "• Leva de 30 s a 3 min (pode haver fila) e há um limite diário gratuito.\n" +
+                        "• Precisa de internet. O modo do aparelho continua funcionando offline.",
+                    fontSize = 14.sp,
+                )
+            },
+            confirmButton = { Button(onClick = { showCloud = false; vm.cloudGenerate() }) { Text("Gerar na nuvem") } },
+            dismissButton = { TextButton(onClick = { showCloud = false }) { Text("Agora não") } },
+        )
+    }
+
+    if (showToken) {
+        var t by remember { mutableStateOf(vm.hfToken) }
+        AlertDialog(
+            onDismissRequest = { showToken = false },
+            title = { Text("Token do Hugging Face (opcional)") },
+            text = {
+                Column {
+                    Text(
+                        "Sem token, a cota diária gratuita é menor e compartilhada. Com uma conta grátis em huggingface.co → Settings → Access Tokens (tipo \"Read\"), a cota fica sua. O token fica salvo só neste aparelho.",
+                        fontSize = 13.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(value = t, onValueChange = { t = it }, singleLine = true, placeholder = { Text("hf_…") }, modifier = Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = { Button(onClick = { vm.saveHfToken(t); showToken = false; snack(if (t.isBlank()) "Token removido." else "Token salvo.") }) { Text("Salvar") } },
+            dismissButton = { TextButton(onClick = { showToken = false }) { Text("Cancelar") } },
         )
     }
 
@@ -459,8 +507,19 @@ private fun AttachRow(icon: Painter, title: String, subtitle: String, onClick: (
 }
 
 @Composable
-private fun PhotoControls(vm: StudioViewModel, modifier: Modifier, onAddCamera: () -> Unit, onAddGallery: () -> Unit) {
+private fun PhotoControls(vm: StudioViewModel, modifier: Modifier, onAddCamera: () -> Unit, onAddGallery: () -> Unit, onCloud: () -> Unit) {
     Column(modifier.padding(bottom = 8.dp)) {
+        if (vm.source != Source.CLOUD) {
+            Button(
+                onClick = onCloud,
+                modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 6.dp),
+                shape = RoundedCornerShape(50),
+            ) {
+                Icon(Icons.Default.Star, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Qualidade máxima (nuvem grátis)", fontWeight = FontWeight.SemiBold)
+            }
+        }
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             contentPadding = PaddingValues(horizontal = 10.dp),

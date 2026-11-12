@@ -115,6 +115,26 @@ class GradioClient(val space: String, private val token: String? = null) {
         throw SpaceException("A conexão terminou sem resultado")
     }
 
+    /**
+     * A fila espera um valor para CADA entrada da função, inclusive as ocultas
+     * (componentes de estado, que não aparecem na API pública): preenche essas com null,
+     * como faz o cliente oficial.
+     */
+    private fun fullInputs(api: String, data: List<Any?>): List<Any?> {
+        val name = api.trimStart('/')
+        val dep = config["dependencies"].list().firstOrNull { it.obj()["api_name"] == name }.obj()
+        val inputs = dep["inputs"].list().map { (it as Double).toInt() }
+        if (inputs.isEmpty()) return data
+        val types = config["components"].list().associate { c -> val m = c.obj(); (m["id"] as Double).toInt() to (m["type"] as? String ?: "") }
+        val out = ArrayList<Any?>()
+        var k = 0
+        for (id in inputs) {
+            if (types[id] == "state") out += null
+            else out += if (k < data.size) data[k++] else null
+        }
+        return out
+    }
+
     /** Índice da função na configuração do espaço (necessário para a fila). */
     private fun fnIndex(api: String): Int {
         val name = api.trimStart('/')
@@ -137,7 +157,7 @@ class GradioClient(val space: String, private val token: String? = null) {
         join.doOutput = true
         join.setRequestProperty("Content-Type", "application/json")
         join.outputStream.use {
-            it.write(Json.stringify(mapOf("data" to data, "event_data" to null, "fn_index" to idx, "trigger_id" to null, "session_hash" to sessionHash)).toByteArray())
+            it.write(Json.stringify(mapOf("data" to fullInputs(api, data), "event_data" to null, "fn_index" to idx, "trigger_id" to null, "session_hash" to sessionHash)).toByteArray())
         }
         read(join)
         val s = open("$src$p/queue/data?session_hash=$sessionHash")
@@ -167,7 +187,10 @@ class GradioClient(val space: String, private val token: String? = null) {
                     }
                     "process_completed" -> {
                         val out = msg["output"].obj()
-                        if (msg["success"] == false || out["error"] != null) throw SpaceException(friendlyError(Json.stringify(out["error"])))
+                        if (msg["success"] == false || out["error"] != null) {
+                            if (System.getenv("VORTICIS_CLOUD_TEST") == "1") System.err.println("nuvem: resposta bruta = " + Json.stringify(msg).take(1500))
+                            throw SpaceException(friendlyError(Json.stringify(out["error"])))
+                        }
                         return out["data"].list()
                     }
                     "unexpected_error" -> throw SpaceException(friendlyError(Json.stringify(msg["message"])))

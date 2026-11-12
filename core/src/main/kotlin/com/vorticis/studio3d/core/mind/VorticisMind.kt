@@ -38,7 +38,7 @@ data class MindResult(
     val changed: Boolean = true,
 )
 
-enum class Special { UNDO, REDO, HELP, EXPORT, PHOTO_REQUEST }
+enum class Special { UNDO, REDO, HELP, EXPORT, PHOTO_REQUEST, CLOUD }
 
 /**
  * "Vorticis Mind": interpretador de linguagem natural (português e inglês) que roda
@@ -111,6 +111,10 @@ class VorticisMind(private val textRasterizer: TextRasterizer? = null) {
         if (has(text, " exporta", " export ", " salva ", " salvar ", " salve ", " baixar", " download", " compartilh")) return MindResult(scene, "Abrindo as opções de exportação.", special = Special.EXPORT, changed = false)
         if (has(text, " limpa", " limpar", " apaga tudo", " apague tudo", " remova tudo", " remove tudo", " novo projeto", " comecar de novo", " recomec", " reset", " clear ", " zerar", " zere ")) {
             return MindResult(Scene(nextGroup = scene.nextGroup), "Cena limpa. O que vamos criar agora?")
+        }
+
+        if (has(text, " qualidade maxima", " nuvem", " trellis", " alta qualidade", " modo pro", " cloud")) {
+            return MindResult(scene, "Vou gerar na nuvem gratuita (TRELLIS) com a foto atual.", special = Special.CLOUD, changed = false)
         }
 
         // comandos sobre a foto

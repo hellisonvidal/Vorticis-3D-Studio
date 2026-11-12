@@ -17,6 +17,9 @@ import com.vorticis.studio3d.core.mind.Special
 import com.vorticis.studio3d.core.mind.VorticisMind
 import com.vorticis.studio3d.core.model.Node
 import com.vorticis.studio3d.core.model.Scene
+import com.vorticis.studio3d.core.cloud.CloudGenerator
+import com.vorticis.studio3d.core.cloud.GlbImporter
+import com.vorticis.studio3d.photo.AndroidImageDecoder
 import com.vorticis.studio3d.core.photo.CaptureLayout
 import com.vorticis.studio3d.core.photo.Cloud
 import com.vorticis.studio3d.core.photo.DepthMap
@@ -56,10 +59,11 @@ sealed interface UiEvent {
     data class Snack(val text: String, val share: ExportFile? = null) : UiEvent
     data object OpenCamera : UiEvent
     data object OpenExport : UiEvent
+    data object AskCloud : UiEvent
 }
 
 /** De onde veio o modelo atual (define as sugestões da conversa). */
-enum class Source { NONE, TEXT, PHOTO, MULTI, VIDEO }
+enum class Source { NONE, TEXT, PHOTO, MULTI, VIDEO, CLOUD }
 
 class StudioViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -129,8 +133,9 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
                 "mesa redonda de madeira com 4 cadeiras", "foguete vermelho com 3 aletas", "casa azul com telhado vermelho",
                 "texto 'OLÁ' dourado", "castelo com 6 torres", "esfera dourada em cima de um cubo de mármore", "o que você sabe fazer?",
             )
+            source == Source.CLOUD -> listOf("pinte de dourado", "deixe 2 vezes maior", "gire 45 graus", "exportar", "desfazer")
             source == Source.PHOTO -> listOf(
-                "foto com mais volume", "foto com menos volume", "transforme a foto em vaso", "foto em relevo",
+                "qualidade máxima na nuvem", "foto com mais volume", "foto com menos volume", "transforme a foto em vaso", "foto em relevo",
                 "extrusão da foto", "pinte de dourado", "exportar",
             )
             source == Source.MULTI || source == Source.VIDEO -> listOf(
@@ -180,6 +185,7 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
                     Special.REDO -> { redo(); say("Refeito. ↪️") }
                     Special.EXPORT -> { say("Abrindo a exportação: escolha um formato ou exporte todos de uma vez. 📦"); events.send(UiEvent.OpenExport) }
                     Special.PHOTO_REQUEST -> { say("Abrindo a câmera. 📷"); events.send(UiEvent.OpenCamera) }
+                    Special.CLOUD -> events.send(UiEvent.AskCloud)
                     else -> say(res.message)
                 }
                 val requestedMode = res.photoMode
@@ -358,6 +364,71 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         val tip = if (multi) "Se o formato ficou estranho, confira o sentido da volta nos botões abaixo do modelo."
         else "Experimente os modos abaixo do modelo ou diga \"foto com mais volume\"."
         say("✨ ${result.explanation}\n$tip")
+    }
+
+    // ------------------------------------------------------------------ nuvem grátis
+    var hfToken by mutableStateOf(prefs.getString("hfToken", "") ?: "")
+        private set
+    val cloudConsent: Boolean get() = prefs.getBoolean("cloudConsent", false)
+    val hasPhotoForCloud: Boolean get() = photo != null
+
+    fun saveHfToken(t: String) {
+        hfToken = t.trim()
+        prefs.edit().putString("hfToken", hfToken).apply()
+    }
+
+    /**
+     * Qualidade máxima: envia só o RECORTE do objeto (fundo transparente) ao TRELLIS
+     * gratuito no Hugging Face e importa o GLB devolvido.
+     */
+    fun cloudGenerate() {
+        val p = photo
+        if (p == null) { say("Primeiro envie uma foto (toque em ＋)."); return }
+        if (busy != null) return
+        prefs.edit().putBoolean("cloudConsent", true).apply()
+        busy = "Preparando a foto para a nuvem…"
+        messages += ChatMessage(true, "✨ Qualidade máxima na nuvem")
+        viewModelScope.launch {
+            try {
+                // animação de pontos enquanto a nuvem trabalha
+                cloudSession++
+                cloud = CloudState(cloudSession, PreviewCloud.build(p.pixels, p.width, p.height))
+                cloudShownAt = System.currentTimeMillis()
+                val png = withContext(Dispatchers.Default) { cutoutPng(p) }
+                val anim = launch { maskCloud(p, photoDepth) }
+                val glb = withContext(Dispatchers.IO) {
+                    CloudGenerator.generate(png, "image/png", hfToken.ifBlank { null }, progress = { m, _ -> busy = m })
+                }
+                busy = "Montando o modelo…"
+                anim.cancel()
+                val sc = withContext(Dispatchers.Default) { GlbImporter.import(glb, AndroidImageDecoder) }
+                commit(sc)
+                source = Source.CLOUD
+                say("✨ Pronto! Modelo gerado pela IA TRELLIS (Microsoft, código aberto) na nuvem gratuita: ${"%,d".format(sc.triangleCount)} triângulos, com textura e verso completos. Dá para editar por comando e exportar em todos os formatos.")
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                say("A nuvem gratuita não conseguiu agora: ${e.message ?: e.javaClass.simpleName}\nO modelo feito no aparelho continua disponível.")
+            } finally {
+                endCloud()
+                busy = null
+            }
+        }
+    }
+
+    /** PNG com fundo transparente, recortado no objeto com margem (só o objeto sai do aparelho). */
+    private fun cutoutPng(p: PhotoInput): ByteArray {
+        val bb = p.mask.bbox() ?: intArrayOf(0, 0, p.width - 1, p.height - 1)
+        val mx = ((bb[2] - bb[0]) * 0.08f).toInt() + 4; val my = ((bb[3] - bb[1]) * 0.08f).toInt() + 4
+        val x0 = (bb[0] - mx).coerceAtLeast(0); val y0 = (bb[1] - my).coerceAtLeast(0)
+        val x1 = (bb[2] + mx).coerceAtMost(p.width - 1); val y1 = (bb[3] + my).coerceAtMost(p.height - 1)
+        val w = x1 - x0 + 1; val h = y1 - y0 + 1
+        val px = IntArray(w * h)
+        for (y in 0 until h) for (x in 0 until w) {
+            val sx = x0 + x; val sy = y0 + y
+            px[y * w + x] = if (p.mask[sx, sy]) p.pixels[sy * p.width + sx] or (0xFF shl 24) else 0
+        }
+        val bmp = android.graphics.Bitmap.createBitmap(px, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        return java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
     }
 
     // ------------------------------------------------------------------ exportação
