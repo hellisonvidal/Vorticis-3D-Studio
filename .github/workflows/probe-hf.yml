@@ -1,0 +1,28 @@
+name: Sondar nuvem grátis
+
+on:
+  workflow_dispatch:
+    inputs:
+      spaces:
+        description: "Espaços (separados por vírgula)"
+        required: false
+        default: ""
+      try_generate:
+        description: "Teste de geração: espaço|json com passos"
+        required: false
+        default: ""
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q gradio_client
+      - name: Sondar
+        env:
+          TRY_GENERATE: ${{ github.event.inputs.try_generate }}
+        run: python tools/probe/probe_hf.py ${{ github.event.inputs.spaces }}
