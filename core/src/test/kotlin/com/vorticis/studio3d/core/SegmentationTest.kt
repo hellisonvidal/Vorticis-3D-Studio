@@ -59,4 +59,21 @@ class SegmentationTest {
         assertTrue(b > 0.75f, "GrabCut IoU $b")
         assertTrue(b >= a, "novo não pode ser pior")
     }
+
+    @Test fun previewCloudDump() {
+        val (px, _) = busyScene()
+        val mask = GrabCut.segment(px, 360, 480)
+        val a = com.vorticis.studio3d.core.photo.PreviewCloud.build(px, 360, 480)
+        val b = com.vorticis.studio3d.core.photo.PreviewCloud.build(px, 360, 480, mask)
+        assertTrue(a.count == b.count && a.count > 1000)
+        val out = java.io.File(System.getProperty("vorticis.out") ?: "build/test-exports").apply { mkdirs() }
+        for ((name, c) in listOf("cloud_plane" to a, "cloud_masked" to b)) {
+            val bb = java.nio.ByteBuffer.allocate(c.data.size * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            c.data.forEach { bb.putFloat(it) }
+            java.io.File(out, "$name.bin").writeBytes(bb.array())
+        }
+        val bmp = java.awt.image.BufferedImage(360, 480, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        for (y in 0 until 480) for (x in 0 until 360) bmp.setRGB(x, y, px[y * 360 + x])
+        javax.imageio.ImageIO.write(bmp, "png", java.io.File(out, "cena_shopping.png"))
+    }
 }

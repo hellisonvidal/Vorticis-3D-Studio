@@ -6,3 +6,6 @@ local.properties
 .DS_Store
 captures/
 .kotlin/
+
+# modelo de IA baixado pelo GitHub Actions (não versionado)
+app/src/main/assets/models/*.onnx

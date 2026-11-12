@@ -31,6 +31,12 @@ Todas as versões são assinadas com a mesma chave, então dá para atualizar se
 
 A textura é a própria foto. As malhas geradas são **fechadas** (*watertight*), prontas para impressão 3D.
 
+### 1a. IA de profundidade (foto única)
+O APK inclui o **Depth Anything V2 Small** (quantizado, licença Apache-2.0), executado no aparelho com **ONNX Runtime**. Ele estima a distância de cada pixel até a câmera. A frente do modelo segue esse relevo (rosto, braços e joelhos "saem" de verdade), e a silhueta inflada forma o verso. O verso usa uma versão suavizada da foto, para não repetir o rosto ou a estampa nas costas. As bordas recebem a cor de dentro do objeto, sem a "franja" do fundo. O modelo é baixado pelo GitHub Actions na hora de gerar o APK e testado lá com uma cena sintética.
+
+### Animação de processamento
+Ao enviar uma foto, ela se monta em pontos 3D com uma linha de varredura. Depois do recorte, o fundo se desfaz e o objeto ganha volume, e o modelo final surge no lugar dos pontos. O visualizador não gira sozinho; o usuário gira com o dedo.
+
 ### 1b. Várias fotos → 3D (forma real, inclusive o verso)
 Depois da primeira foto, toque em **"+ Ângulo"** e fotografe andando **para a sua direita** ao redor do objeto, sempre na **mesma distância e altura**. Você também pode escolher várias fotos de uma vez na galeria, ou compartilhar várias fotos com o app.
 

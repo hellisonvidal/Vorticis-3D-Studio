@@ -210,11 +210,9 @@ fun StudioScreen(vm: StudioViewModel) {
         }
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-    ) {
+    // Surface define a cor padrão de textos/ícones (antes ficavam escuros sobre o fundo escuro)
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background, contentColor = MaterialTheme.colorScheme.onSurface) {
+    Box(Modifier.fillMaxSize()) {
         // safeDrawing = barras do sistema + recorte da tela + TECLADO: o conteúdo sobe junto com o teclado
         Column(
             Modifier
@@ -231,15 +229,13 @@ fun StudioScreen(vm: StudioViewModel) {
                 Image(painterResource(R.drawable.logo_vorticis), null, Modifier.size(36.dp).clip(RoundedCornerShape(9.dp)))
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Vorticis 3D Studio", fontWeight = FontWeight.Bold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Vorticis 3D Studio", fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface)
                     Text(
                         vm.busy ?: "IA no aparelho • funciona offline",
                         fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         color = if (vm.busy != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                IconButton(onClick = vm::undo, enabled = vm.canUndo) { Icon(painterResource(R.drawable.ic_undo), "Desfazer") }
-                IconButton(onClick = vm::redo, enabled = vm.canRedo) { Icon(painterResource(R.drawable.ic_redo), "Refazer") }
                 IconButton(onClick = { showExport = true }) { Icon(painterResource(R.drawable.ic_download), "Exportar") }
                 Box {
                     IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "Mais opções") }
@@ -264,10 +260,15 @@ fun StudioScreen(vm: StudioViewModel) {
             ) {
                 AndroidView(
                     factory = { ModelSurfaceView(it) },
-                    update = { it.setScene(vm.scene) },
+                    update = { it.setScene(vm.scene); it.setCloud(vm.cloud) },
                     modifier = Modifier.fillMaxSize(),
                 )
-                if (!vm.scene.isEmpty) {
+                // desfazer/refazer sobre o visualizador (libera espaço no cabeçalho)
+                if (vm.canUndo || vm.canRedo) Row(Modifier.align(Alignment.TopEnd).padding(4.dp)) {
+                    IconButton(onClick = vm::undo, enabled = vm.canUndo) { Icon(painterResource(R.drawable.ic_undo), "Desfazer", tint = if (vm.canUndo) Color.White else Color(0x55FFFFFF)) }
+                    IconButton(onClick = vm::redo, enabled = vm.canRedo) { Icon(painterResource(R.drawable.ic_redo), "Refazer", tint = if (vm.canRedo) Color.White else Color(0x55FFFFFF)) }
+                }
+                if (!vm.scene.isEmpty && vm.cloud == null) {
                     Surface(
                         Modifier.padding(10.dp).align(Alignment.TopStart),
                         color = Color(0x99000000), shape = RoundedCornerShape(10.dp),
@@ -277,25 +278,27 @@ fun StudioScreen(vm: StudioViewModel) {
                             Modifier.padding(horizontal = 8.dp, vertical = 4.dp), fontSize = 11.sp, color = Color(0xDDFFFFFF),
                         )
                     }
-                } else if (!imeVisible) {
-                    StartCards(
-                        Modifier.align(Alignment.Center),
-                        onPhoto = { openCamera(false) },
-                        onMulti = { openGallery(false) },
-                        onVideo = { showVideoTips = true },
-                        onDescribe = { chatExpanded = true; inputFocus.requestFocus(); keyboard?.show() },
+                } else if (vm.scene.isEmpty && vm.cloud == null && vm.busy == null && !imeVisible) {
+                    Text(
+                        "Toque em ＋ para enviar fotos ou vídeo da galeria,\nou descreva o que quer criar.",
+                        Modifier.align(Alignment.Center).padding(24.dp),
+                        textAlign = TextAlign.Center, fontSize = 13.sp, color = Color(0x99FFFFFF),
                     )
                 }
                 vm.busy?.let { msg ->
-                    Surface(Modifier.align(Alignment.Center), color = Color(0xE610131A), shape = RoundedCornerShape(16.dp)) {
-                        Row(Modifier.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(12.dp))
-                            Text(msg, color = Color.White, fontSize = 14.sp)
+                    // durante a animação de pontos, o aviso fica discreto no rodapé do visualizador
+                    Surface(
+                        Modifier.align(if (vm.cloud != null) Alignment.BottomCenter else Alignment.Center).padding(bottom = 14.dp),
+                        color = Color(0xCC10131A), shape = RoundedCornerShape(50),
+                    ) {
+                        Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(10.dp))
+                            Text(msg, color = Color.White, fontSize = 13.sp)
                         }
                     }
                 }
-                if (vm.hasPhoto && !imeVisible) PhotoControls(vm, Modifier.align(Alignment.BottomCenter), onAddCamera = { openCamera(true) }, onAddGallery = { openGallery(true) })
+                if (vm.hasPhoto && !imeVisible && vm.cloud == null && vm.busy == null) PhotoControls(vm, Modifier.align(Alignment.BottomCenter), onAddCamera = { openCamera(true) }, onAddGallery = { openGallery(true) })
             }
 
             // ------------------------------------------------ conversa
@@ -317,6 +320,7 @@ fun StudioScreen(vm: StudioViewModel) {
             Snackbar(data, shape = RoundedCornerShape(12.dp))
         }
     }
+    }
 
     // ------------------------------------------------ menu ＋
     if (showAttach) {
@@ -324,13 +328,15 @@ fun StudioScreen(vm: StudioViewModel) {
             Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 28.dp)) {
                 Text("Criar a partir de…", fontWeight = FontWeight.Bold, fontSize = 18.sp)
                 Spacer(Modifier.height(8.dp))
-                AttachRow(painterResource(R.drawable.ic_camera), "Tirar uma foto", "Uma foto já vira 3D. Fundo liso ajuda.") { showAttach = false; openCamera(false) }
-                AttachRow(painterResource(R.drawable.ic_gallery), "Fotos da galeria", "Escolha 1 foto, ou várias do mesmo objeto (ao redor dele).") { showAttach = false; openGallery(false) }
-                AttachRow(painterResource(R.drawable.ic_video), "Gravar vídeo dando a volta", "Ande ao redor do objeto (10 a 20 s), ou gire o objeto.") { showAttach = false; showVideoTips = true }
-                AttachRow(painterResource(R.drawable.ic_video), "Escolher vídeo da galeria", "Um vídeo curto mostrando o objeto por todos os lados.") {
+                AttachRow(painterResource(R.drawable.ic_gallery), "Fotos da galeria", "1 foto, ou várias do mesmo objeto tiradas ao redor dele.") { showAttach = false; openGallery(false) }
+                AttachRow(painterResource(R.drawable.ic_video), "Vídeo da galeria", "Um vídeo curto dando a volta no objeto (10 a 20 s).") {
                     showAttach = false
                     pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
                 }
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                Text("Usar a câmera agora", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp, bottom = 2.dp))
+                AttachRow(painterResource(R.drawable.ic_camera), "Tirar foto", "Fundo liso e boa luz ajudam.") { showAttach = false; openCamera(false) }
+                AttachRow(painterResource(R.drawable.ic_video), "Gravar vídeo dando a volta", "Ande ao redor do objeto, ou gire o objeto.") { showAttach = false; showVideoTips = true }
             }
         }
     }
@@ -436,42 +442,6 @@ fun StudioScreen(vm: StudioViewModel) {
 }
 
 @Composable
-private fun StartCards(modifier: Modifier, onPhoto: () -> Unit, onMulti: () -> Unit, onVideo: () -> Unit, onDescribe: () -> Unit) {
-    Column(modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("O que vamos criar?", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-        Text("Tudo é processado no seu celular", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            StartCard(painterResource(R.drawable.ic_camera), "Foto", "1 foto", onPhoto)
-            StartCard(painterResource(R.drawable.ic_gallery), "Várias fotos", "ao redor", onMulti)
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            StartCard(painterResource(R.drawable.ic_video), "Vídeo", "dando a volta", onVideo)
-            StartCard(painterResource(R.drawable.ic_chat), "Descrever", "por texto ou voz", onDescribe)
-        }
-    }
-}
-
-@Composable
-private fun StartCard(icon: Painter, title: String, subtitle: String, onClick: () -> Unit) {
-    Surface(
-        Modifier.width(140.dp).clip(RoundedCornerShape(16.dp)).clickable(onClick = onClick),
-        color = Color(0xCC1C2130), shape = RoundedCornerShape(16.dp),
-    ) {
-        Column(Modifier.padding(14.dp)) {
-            Box(
-                Modifier.size(36.dp).clip(CircleShape).background(Brush.linearGradient(listOf(Color(0xFF3B5BDB), Color(0xFF7A4DFF)))),
-                contentAlignment = Alignment.Center,
-            ) { Icon(icon, null, Modifier.size(20.dp), tint = Color.White) }
-            Spacer(Modifier.height(8.dp))
-            Text(title, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-            Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
 private fun AttachRow(icon: Painter, title: String, subtitle: String, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(vertical = 10.dp, horizontal = 6.dp),
@@ -506,14 +476,19 @@ private fun PhotoControls(vm: StudioViewModel, modifier: Modifier, onAddCamera: 
             }
             item {
                 AssistChip(
-                    onClick = onAddCamera,
-                    label = { Text("+ Ângulo", fontSize = 12.sp) },
-                    leadingIcon = { Icon(painterResource(R.drawable.ic_camera), null, Modifier.size(16.dp)) },
+                    onClick = onAddGallery,
+                    label = { Text("+ Ângulos da galeria", fontSize = 12.sp, color = Color.White) },
+                    leadingIcon = { Icon(painterResource(R.drawable.ic_gallery), null, Modifier.size(16.dp), tint = Color.White) },
                     colors = AssistChipDefaults.assistChipColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
                 )
             }
             item {
-                AssistChip(onClick = onAddGallery, label = { Text("+ Da galeria", fontSize = 12.sp) }, colors = AssistChipDefaults.assistChipColors(containerColor = Color(0xCC242833)))
+                AssistChip(
+                    onClick = onAddCamera,
+                    label = { Text("Câmera", fontSize = 12.sp, color = Color.White) },
+                    leadingIcon = { Icon(painterResource(R.drawable.ic_camera), null, Modifier.size(16.dp), tint = Color.White) },
+                    colors = AssistChipDefaults.assistChipColors(containerColor = Color(0xCC242833)),
+                )
             }
             if (vm.photoCount > 1) item {
                 AssistChip(onClick = vm::removeLastPhoto, label = { Text("Remover última", fontSize = 12.sp) }, colors = AssistChipDefaults.assistChipColors(containerColor = Color(0xCC242833)))

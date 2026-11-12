@@ -18,6 +18,8 @@ android {
         targetSdk = 35
         versionCode = 100 + buildNumber
         versionName = "$versionBase.$buildNumber"
+        // só ARM 64 bits (todos os celulares atuais): o ONNX Runtime ocupa ~15 MB por arquitetura
+        ndk { abiFilters += listOf("arm64-v8a") }
         buildConfigField("String", "UPDATE_REPO", "\"hellisonvidal/Vorticis-3D-Studio\"")
     }
 
@@ -53,6 +55,10 @@ android {
         buildConfig = true
     }
 
+    androidResources {
+        noCompress += "onnx"
+    }
+
     packaging {
         resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1")
     }
@@ -85,6 +91,8 @@ dependencies {
 
     // Segmentação do objeto principal no aparelho (Google ML Kit, offline após baixar o módulo)
     implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
+    // IA de profundidade (Depth Anything V2) no aparelho
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     // ModuleInstall: força o download do modelo do ML Kit na primeira abertura
     implementation("com.google.android.gms:play-services-base:18.5.0")
 }

@@ -10,7 +10,7 @@ import com.vorticis.studio3d.core.model.Scene
 
 /**
  * Visualizador 3D: 1 dedo gira, 2 dedos aproximam/afastam e movem,
- * toque duplo reinicia a câmera. Gira sozinho até o primeiro toque.
+ * toque duplo reinicia a câmera. Não gira sozinho (evita tontura).
  */
 @SuppressLint("ClickableViewAccessibility")
 class ModelSurfaceView(context: Context) : GLSurfaceView(context) {
@@ -32,7 +32,7 @@ class ModelSurfaceView(context: Context) : GLSurfaceView(context) {
 
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDoubleTap(e: MotionEvent): Boolean {
-            renderer.resetView(); renderer.autoRotate = true; requestRender()
+            renderer.resetView(); requestRender()
             return true
         }
     })
@@ -43,6 +43,16 @@ class ModelSurfaceView(context: Context) : GLSurfaceView(context) {
         preserveEGLContextOnPause = true
         setRenderer(renderer)
         renderMode = RENDERMODE_WHEN_DIRTY
+    }
+
+    private var currentCloud: Any? = null
+
+    /** Animação de processamento: [state] muda de identidade a cada etapa. */
+    fun setCloud(state: com.vorticis.studio3d.CloudState?) {
+        if (state === currentCloud) return
+        val fresh = state != null && (currentCloud as? com.vorticis.studio3d.CloudState)?.session != state.session
+        currentCloud = state
+        renderer.setCloud(state?.cloud, fresh)
     }
 
     fun setScene(scene: Scene) {

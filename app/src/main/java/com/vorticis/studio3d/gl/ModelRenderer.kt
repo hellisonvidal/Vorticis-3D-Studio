@@ -5,6 +5,7 @@ import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.util.Log
 import com.vorticis.studio3d.core.model.Scene
+import com.vorticis.studio3d.core.photo.Cloud
 import com.vorticis.studio3d.core.model.Texture
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -23,6 +24,20 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
     private class GpuMesh(val vao: Int, val vbo: Int, val ibo: Int, val count: Int, val color: FloatArray, val metallic: Float, val roughness: Float, val tex: Int)
 
     private val pending = AtomicReference<Scene?>(null)
+    private val pendingCloud = AtomicReference<Pair<Cloud?, Boolean>?>(null) // (nuvem, nova sessão?)
+
+    // ---- animação de processamento (nuvem de pontos) ----
+    private var cloudProg = 0
+    private var cloudVao = 0
+    private var cloudVbo = 0
+    private var cloudCount = 0
+    private var cloudStart = 0L        // quando a nuvem apareceu
+    private var maskStart = -1L        // quando o recorte chegou
+    private var endStart = -1L         // quando o modelo final chegou (nuvem some)
+    private var meshFadeStart = -1L
+    private var cloudYMin = 0f
+    private var cloudYMax = 1f
+    private val animating: Boolean get() = cloudCount > 0
     private val meshes = ArrayList<GpuMesh>()
     private val textures = IdentityHashMap<Texture, Int>()
     private var white = 0
@@ -36,7 +51,8 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
     @Volatile var zoom = 1f
     @Volatile var panX = 0f
     @Volatile var panY = 0f
-    @Volatile var autoRotate = true
+    /** Sem rotação automática (causava tontura); o usuário gira com o dedo. */
+    @Volatile var autoRotate = false
     private var target = floatArrayOf(0f, 0.5f, 0f)
     private var radius = 1f
     private var sceneMinY = 0f
@@ -53,6 +69,12 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
         requestRender()
     }
 
+    /** Mostra/atualiza a nuvem de pontos da foto em processamento (null = encerrar). */
+    fun setCloud(c: Cloud?, newSession: Boolean) {
+        pendingCloud.set(c to newSession)
+        requestRender()
+    }
+
     fun resetView() {
         yaw = 0.6f; pitch = 0.35f; zoom = 1f; panX = 0f; panY = 0f
         requestRender()
@@ -64,6 +86,10 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
         GL.glEnable(GL.GL_CULL_FACE)
         prog = program(VS, FS)
         gridProg = program(GRID_VS, GRID_FS)
+        cloudProg = program(CLOUD_VS, CLOUD_FS)
+        val cv = IntArray(1); GL.glGenVertexArrays(1, cv, 0); cloudVao = cv[0]
+        val cb = IntArray(1); GL.glGenBuffers(1, cb, 0); cloudVbo = cb[0]
+        cloudCount = 0
         white = uploadTexture(Texture(1, 1, intArrayOf(-1)))
         // quad do chão
         val quad = floatArrayOf(-1f, 0f, -1f, 1f, 0f, -1f, 1f, 0f, 1f, -1f, 0f, -1f, 1f, 0f, 1f, -1f, 0f, 1f)
@@ -88,8 +114,12 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        pending.getAndSet(null)?.let { upload(it) }
         val now = System.nanoTime()
+        pendingCloud.getAndSet(null)?.let { (c, fresh) -> uploadCloud(c, fresh, now) }
+        pending.getAndSet(null)?.let {
+            upload(it)
+            if (animating) { if (endStart < 0) endStart = now; meshFadeStart = now; framePreviewFromScene = true }
+        }
         val dt = if (lastFrame == 0L) 0f else ((now - lastFrame) / 1e9f).coerceAtMost(0.1f)
         lastFrame = now
         if (autoRotate) yaw += dt * 0.35f
@@ -121,8 +151,12 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
         GL.glDisable(GL.GL_BLEND)
         GL.glEnable(GL.GL_CULL_FACE)
 
-        // modelos
+        // modelos (surgem com fade quando vêm depois da animação)
+        val meshAlpha = if (meshFadeStart < 0) 1f else ((now - meshFadeStart) / 0.9e9f).coerceIn(0f, 1f)
+        if (meshAlpha >= 1f) meshFadeStart = -1L
+        if (meshAlpha < 1f) { GL.glEnable(GL.GL_BLEND); GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA) }
         GL.glUseProgram(prog)
+        GL.glUniform1f(GL.glGetUniformLocation(prog, "uAlpha"), meshAlpha)
         GL.glUniformMatrix4fv(GL.glGetUniformLocation(prog, "uVP"), 1, false, vp, 0)
         GL.glUniform3f(GL.glGetUniformLocation(prog, "uCam"), ex, ey, ez)
         val uColor = GL.glGetUniformLocation(prog, "uColor")
@@ -137,7 +171,69 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
             GL.glDrawElements(GL.GL_TRIANGLES, m.count, GL.GL_UNSIGNED_INT, 0)
         }
         GL.glBindVertexArray(0)
-        if (autoRotate) requestRender()
+        if (meshAlpha < 1f) GL.glDisable(GL.GL_BLEND)
+
+        // nuvem de pontos da animação
+        if (animating) {
+            val t = { start: Long -> if (start < 0) -1f else (now - start) / 1e9f }
+            val tEnd = t(endStart)
+            if (tEnd > 1.0f) { cloudCount = 0; endStart = -1L; maskStart = -1L } else {
+                GL.glUseProgram(cloudProg)
+                GL.glUniformMatrix4fv(GL.glGetUniformLocation(cloudProg, "uVP"), 1, false, vp, 0)
+                GL.glUniform1f(GL.glGetUniformLocation(cloudProg, "uAppear"), t(cloudStart))
+                GL.glUniform1f(GL.glGetUniformLocation(cloudProg, "uMask"), t(maskStart))
+                GL.glUniform1f(GL.glGetUniformLocation(cloudProg, "uEnd"), tEnd)
+                GL.glUniform1f(GL.glGetUniformLocation(cloudProg, "uTime"), t(cloudStart))
+                GL.glUniform1f(GL.glGetUniformLocation(cloudProg, "uPointSize"), height * 0.0055f * dist)
+                GL.glUniform2f(GL.glGetUniformLocation(cloudProg, "uYRange"), cloudYMin, cloudYMax)
+                GL.glEnable(GL.GL_BLEND); GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+                GL.glDepthMask(false)
+                GL.glBindVertexArray(cloudVao)
+                GL.glDrawArrays(GL.GL_POINTS, 0, cloudCount)
+                GL.glBindVertexArray(0)
+                GL.glDepthMask(true)
+                GL.glDisable(GL.GL_BLEND)
+            }
+        }
+        if (autoRotate || animating || meshFadeStart >= 0) requestRender()
+    }
+
+    private var framePreviewFromScene = false
+
+    private fun uploadCloud(c: Cloud?, fresh: Boolean, now: Long) {
+        if (c == null) {                      // encerrar (erro ou cancelamento): some suavemente
+            if (animating && endStart < 0) endStart = now
+            return
+        }
+        GL.glBindVertexArray(cloudVao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, cloudVbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, c.data.size * 4, floatBuffer(c.data), GL.GL_DYNAMIC_DRAW)
+        val st = Cloud.STRIDE * 4
+        GL.glEnableVertexAttribArray(0); GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, false, st, 0)
+        GL.glEnableVertexAttribArray(1); GL.glVertexAttribPointer(1, 3, GL.GL_FLOAT, false, st, 12)
+        GL.glEnableVertexAttribArray(2); GL.glVertexAttribPointer(2, 3, GL.GL_FLOAT, false, st, 24)
+        GL.glEnableVertexAttribArray(3); GL.glVertexAttribPointer(3, 2, GL.GL_FLOAT, false, st, 36)
+        GL.glBindVertexArray(0)
+        cloudCount = c.count
+        if (fresh || cloudStart == 0L) { cloudStart = now; maskStart = -1L; endStart = -1L }
+        if (c.masked && maskStart < 0) maskStart = now
+        // enquadra a câmera na foto (plano) e no objeto (alvo)
+        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        var i = 0
+        while (i < c.data.size) {
+            for (o in intArrayOf(0, 3)) {
+                minX = minOf(minX, c.data[i + o]); maxX = maxOf(maxX, c.data[i + o])
+                minY = minOf(minY, c.data[i + o + 1]); maxY = maxOf(maxY, c.data[i + o + 1])
+            }
+            i += Cloud.STRIDE * 7 // amostra
+        }
+        if (fresh) {
+            target = floatArrayOf((minX + maxX) / 2, (minY + maxY) / 2, 0f)
+            radius = max(0.3f, kotlin.math.hypot(maxX - minX, maxY - minY) / 2f)
+            sceneMinY = minY
+            yaw = 0f; pitch = 0.12f; zoom = 1f; panX = 0f; panY = 0f
+        }
+        cloudYMin = minY; cloudYMax = maxY
     }
 
     private fun upload(scene: Scene) {
@@ -177,6 +273,7 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
             meshes += GpuMesh(ids[0], bufs[0], bufs[1], mesh.indices.size, floatArrayOf(mat.r, mat.g, mat.b, 1f), mat.metallic, mat.roughness, tex)
         }
         val b = scene.bounds()
+        if (animating) { yaw = 0.35f; pitch = 0.15f }
         if (!b.isEmpty) {
             target = floatArrayOf(b.centerX, b.centerY, b.centerZ)
             radius = max(0.3f, kotlin.math.sqrt(b.sizeX * b.sizeX + b.sizeY * b.sizeY + b.sizeZ * b.sizeZ) / 2f)
@@ -239,7 +336,7 @@ void main() {
         private const val FS = """#version 300 es
 precision highp float;
 in vec3 vPos; in vec3 vNor; in vec2 vUv;
-uniform vec4 uColor; uniform vec2 uMR; uniform vec3 uCam; uniform sampler2D uTex;
+uniform vec4 uColor; uniform vec2 uMR; uniform vec3 uCam; uniform sampler2D uTex; uniform float uAlpha;
 out vec4 frag;
 vec3 toLin(vec3 c) { return pow(c, vec3(2.2)); }
 vec3 sky(vec3 d) {
@@ -274,7 +371,54 @@ void main() {
     col += diff * sky(N) * 0.35;
     col += F * sky(R) * (1.0 - rough * 0.7) * 0.6;
     col = col / (col + vec3(1.0)) * 1.25; // tonemap suave
-    frag = vec4(pow(col, vec3(1.0 / 2.2)), 1.0);
+    frag = vec4(pow(col, vec3(1.0 / 2.2)), uAlpha);
+}"""
+
+        private const val CLOUD_VS = """#version 300 es
+layout(location=0) in vec3 aPlane;
+layout(location=1) in vec3 aTarget;
+layout(location=2) in vec3 aColor;
+layout(location=3) in vec2 aMeta;
+uniform mat4 uVP;
+uniform float uAppear; uniform float uMask; uniform float uEnd; uniform float uTime;
+uniform float uPointSize; uniform vec2 uYRange;
+out vec4 vColor;
+void main() {
+    float fg = aMeta.x; float seed = aMeta.y;
+    // 1) os pontos chegam espalhados e formam a foto
+    // chegam de trás (nunca passam perto da câmera)
+    vec3 scatter = aPlane * 0.3 + vec3(sin(seed * 91.7) * 1.3, cos(seed * 53.1) * 0.8 + 0.6, -abs(sin(seed * 17.3)) * 1.6 - 0.4);
+    float a = smoothstep(0.0, 1.0, uAppear * 1.3 - seed * 0.6);
+    vec3 p = mix(scatter, aPlane, a);
+    float alpha = a;
+    // 2) recorte: o fundo cai e some; o objeto ganha volume
+    if (uMask >= 0.0) {
+        float k = smoothstep(0.0, 1.0, uMask * 1.1 - seed * 0.5);
+        if (fg > 0.5) p = mix(aPlane, aTarget, k);
+        else { p = aPlane + vec3(0.0, -k * 0.5, -k * 0.4); alpha *= 1.0 - k; }
+    }
+    // respiração sutil enquanto processa
+    p += vec3(0.0, 0.0, 0.006 * sin(uTime * 4.0 + seed * 30.0));
+    // 3) modelo pronto: os pontos se desfazem
+    if (uEnd >= 0.0) { alpha *= 1.0 - smoothstep(0.0, 0.9, uEnd); p += normalize(p - vec3(0.0, 0.6, 0.0) + 0.001) * uEnd * 0.15; }
+    // linha de varredura que percorre o objeto
+    float ny = (p.y - uYRange.x) / max(uYRange.y - uYRange.x, 0.001);
+    float sy = 1.0 - fract(uTime * 0.45);
+    float scan = exp(-pow((ny - sy) * 14.0, 2.0));
+    vColor = vec4(mix(aColor, vec3(0.45, 0.95, 1.0), scan * 0.75) + scan * 0.25, alpha);
+    gl_Position = uVP * vec4(p, 1.0);
+    gl_PointSize = clamp(uPointSize * (1.0 + scan * 0.9) / gl_Position.w, 1.5, 22.0);
+}"""
+
+        private const val CLOUD_FS = """#version 300 es
+precision mediump float;
+in vec4 vColor;
+out vec4 frag;
+void main() {
+    vec2 c = gl_PointCoord - 0.5;
+    float d = dot(c, c);
+    if (d > 0.25) discard;
+    frag = vec4(vColor.rgb, vColor.a * (1.0 - d * 2.0));
 }"""
 
         private const val GRID_VS = """#version 300 es

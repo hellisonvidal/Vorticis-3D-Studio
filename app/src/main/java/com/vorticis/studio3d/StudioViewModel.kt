@@ -18,6 +18,11 @@ import com.vorticis.studio3d.core.mind.VorticisMind
 import com.vorticis.studio3d.core.model.Node
 import com.vorticis.studio3d.core.model.Scene
 import com.vorticis.studio3d.core.photo.CaptureLayout
+import com.vorticis.studio3d.core.photo.Cloud
+import com.vorticis.studio3d.core.photo.DepthMap
+import com.vorticis.studio3d.core.photo.PreviewCloud
+import com.vorticis.studio3d.depth.DepthEstimator
+import kotlinx.coroutines.delay
 import com.vorticis.studio3d.core.photo.MultiView
 import com.vorticis.studio3d.core.photo.MultiViewOptions
 import com.vorticis.studio3d.core.photo.PhotoMode
@@ -41,6 +46,9 @@ import java.util.Date
 import java.util.Locale
 
 data class ChatMessage(val fromUser: Boolean, val text: String)
+
+/** Etapa da animação de processamento (nova instância a cada etapa). */
+class CloudState(val session: Int, val cloud: Cloud)
 
 sealed interface UiEvent {
     data class Share(val intent: Intent) : UiEvent
@@ -82,6 +90,12 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var segmentationReady by mutableStateOf(false)
         private set
+    /** Nuvem de pontos da animação de processamento (null = sem animação). */
+    var cloud by mutableStateOf<CloudState?>(null)
+        private set
+    private var cloudSession = 0
+    private var cloudShownAt = 0L
+    private var photoDepth: DepthMap? = null
 
     val messages = mutableStateListOf(
         ChatMessage(false, "Oi! 👋 Eu sou a Vorticis Mind e transformo ideias em 3D, aqui mesmo no seu celular.\n\n" +
@@ -189,6 +203,26 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ------------------------------------------------------------------ animação
+    private fun startCloud(bmp: android.graphics.Bitmap) {
+        val w = bmp.width; val h = bmp.height
+        val px = IntArray(w * h); bmp.getPixels(px, 0, w, 0, 0, w, h)
+        cloudSession++
+        cloud = CloudState(cloudSession, PreviewCloud.build(px, w, h))
+        cloudShownAt = System.currentTimeMillis()
+    }
+
+    /** Recorte (e profundidade) prontos: o fundo se desfaz e o objeto ganha volume. */
+    private suspend fun maskCloud(p: PhotoInput, depth: DepthMap?) {
+        val c = withContext(Dispatchers.Default) { PreviewCloud.build(p.pixels, p.width, p.height, p.mask, depth?.let { PreviewCloud.normalized(it) }) }
+        val wait = 1600 - (System.currentTimeMillis() - cloudShownAt)   // deixa a foto "montar" antes
+        if (wait > 0) delay(wait)
+        cloud = CloudState(cloudSession, c)
+        delay(1300)                                                   // tempo para ver o volume surgir
+    }
+
+    private fun endCloud() { cloud = null }
+
     // ------------------------------------------------------------------ fotos
     /** Uma foto: [append] = true acrescenta um ângulo à sessão atual. */
     fun onPhoto(uri: Uri, append: Boolean = false) = onPhotos(listOf(uri), append)
@@ -216,7 +250,18 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val bitmaps = withContext(Dispatchers.IO) { list.map { PhotoLoader.load(getApplication(), it) } }
+                startCloud(bitmaps.first())
                 val inputs = segmentAll(bitmaps, "foto")
+                // IA de profundidade na foto principal (molda a frente do modelo)
+                var depth: DepthMap? = null
+                if (!append && inputs.size == 1 && DepthEstimator.isAvailable(getApplication())) {
+                    busy = "Medindo a profundidade com IA…"
+                    val p0 = inputs[0]
+                    depth = withContext(Dispatchers.Default) { DepthEstimator.estimate(getApplication(), p0.pixels, p0.width, p0.height) }
+                }
+                if (!append) photoDepth = depth
+                busy = "Montando o volume…"
+                maskCloud(inputs.first(), depth)
                 if (!append) { photos.clear(); photoThickness = 1f }
                 photos += inputs
                 if (photos.size > 16) photos.subList(0, photos.size - 16).clear()
@@ -227,11 +272,12 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
                     rebuildPhoto(PhotoMode.MULTIVIEW)
                 } else {
                     rebuildPhoto(if (photoMode == PhotoMode.MULTIVIEW) PhotoMode.AUTO else photoMode)
-                    say("💡 Para o objeto inteiro, com o verso real: toque em \"+ Ângulo\" e fotografe andando para a SUA DIREITA ao redor dele, na mesma distância e altura. 4 fotos (frente, lado, trás, outro lado) ou 8 em volta. Ou grave um vídeo dando a volta.")
+                    say("💡 Para o objeto inteiro, com o verso real: toque em \"+ Ângulos da galeria\" e escolha fotos do mesmo objeto tiradas andando para a direita ao redor dele (4 ou 8 fotos), ou envie um vídeo dando a volta.")
                 }
             } catch (e: Throwable) {
                 say("Não consegui processar a foto: ${e.message ?: e.javaClass.simpleName}")
             } finally {
+                endCloud()
                 busy = null
             }
         }
@@ -247,8 +293,11 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
                 val frames = withContext(Dispatchers.IO) {
                     PhotoLoader.videoFrames(getApplication(), uri, count = 30) { i, n -> busy = "Extraindo quadro $i de $n…" }
                 }
+                startCloud(frames.first())
                 val inputs = segmentAll(frames, "quadro")
                 busy = "Procurando a volta completa…"
+                maskCloud(inputs.first(), null)
+                photoDepth = null
                 val plan = withContext(Dispatchers.Default) {
                     VideoLoop.plan(inputs.map { PhotoView(it.pixels, it.width, it.height, it.mask) })
                 }
@@ -263,6 +312,7 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Throwable) {
                 say("Não consegui usar o vídeo: ${e.message ?: e.javaClass.simpleName}")
             } finally {
+                endCloud()
                 busy = null
             }
         }
@@ -300,7 +350,7 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         val snapshot = photos.toList()
         val result = withContext(Dispatchers.Default) {
             if (multi) MultiView.build(snapshot.map { PhotoView(it.pixels, it.width, it.height, it.mask) }, MultiViewOptions(layout = captureLayout))
-            else PhotoTo3D.build(p.pixels, p.width, p.height, p.mask, PhotoOptions(mode = mode, thickness = photoThickness))
+            else PhotoTo3D.build(p.pixels, p.width, p.height, p.mask, PhotoOptions(mode = mode, thickness = photoThickness, depth = photoDepth))
         }
         val node = Node("Foto_${result.mode.name.lowercase()}", result.mesh, result.material, 1, "foto", "corpo")
         commit(Scene(listOf(node), nextGroup = 2))

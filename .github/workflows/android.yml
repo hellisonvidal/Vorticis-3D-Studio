@@ -22,8 +22,21 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: Baixar a IA de profundidade (Depth Anything V2 Small, Apache-2.0)
+        run: |
+          mkdir -p app/src/main/assets/models
+          F=app/src/main/assets/models/depth_anything_v2_small_q.onnx
+          for URL in \
+            https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx \
+            https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx \
+            https://huggingface.co/Xenova/depth-anything-small-hf/resolve/main/onnx/model_quantized.onnx; do
+            if curl -fsSL --retry 3 -o "$F" "$URL"; then echo "Modelo: $URL ($(du -h $F | cut -f1))"; break; fi
+            rm -f "$F"
+          done
+          ls -la app/src/main/assets/models
+
       - name: Testes da IA, geometria e exportadores
-        run: ./gradlew :core:test --no-daemon
+        run: ./gradlew :core:test --no-daemon -i | grep -E "saída=|entradas=|modelo de profundidade|IoU|vídeo|FAILED|Test.*>" || true; ./gradlew :core:test --no-daemon
 
       - name: Compilar APK
         run: ./gradlew :app:assembleRelease --no-daemon

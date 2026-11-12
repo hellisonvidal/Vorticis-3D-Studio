@@ -33,6 +33,8 @@ data class PhotoOptions(
     val resolution: Int = 190,
     /** altura final do objeto em unidades (metros) */
     val targetSize: Float = 1.2f,
+    /** profundidade estimada por IA (Depth Anything); quando presente, molda a frente do objeto */
+    val depth: DepthMap? = null,
 )
 
 data class PhotoResult(val mesh: Mesh, val material: Material, val mode: PhotoMode, val explanation: String)
@@ -111,14 +113,18 @@ object PhotoTo3D {
             val (m, e) = chooseMode(analyze(pixels, w, h, mask)); mode = m; why = e
         } else why = "Modo ${mode.label}: ${mode.description.lowercase()}."
         val bb = if (mode == PhotoMode.RELIEF) intArrayOf(0, 0, w - 1, h - 1) else (mask.bbox() ?: intArrayOf(0, 0, w - 1, h - 1))
-        val tex = crop(pixels, w, bb)
+        val solid = mode != PhotoMode.LATHE && mode != PhotoMode.RELIEF
+        // frente/verso usam um atlas: metade esquerda = foto, metade direita = versão suavizada para o verso
+        // (evita repetir rosto/estampa nas costas); as bordas recebem a cor de dentro (sem "franja" do fundo)
+        val tex = if (solid) frontBackAtlas(bleed(crop(pixels, w, bb), mask, bb)) else crop(pixels, w, bb)
         val material = Material("Foto", 0xFFFFFFFF.toInt(), 0f, 0.7f, tex)
         val mesh = when (mode) {
             PhotoMode.LATHE -> lathe(mask, bb, opt)
-            PhotoMode.EXTRUDE -> gridSolid(pixels, w, mask, bb, opt, extrude = true)
+            PhotoMode.EXTRUDE -> gridSolid(pixels, w, h, mask, bb, opt, extrude = true)
             PhotoMode.RELIEF -> relief(pixels, w, bb, opt)
-            else -> gridSolid(pixels, w, mask, bb, opt, extrude = false)
+            else -> gridSolid(pixels, w, h, mask, bb, opt, extrude = false)
         }
+        if (opt.depth != null && mode == PhotoMode.VOLUME) why += " A IA de profundidade moldou o relevo da frente."
         return PhotoResult(mesh, material, mode, why)
     }
 
@@ -130,6 +136,43 @@ object PhotoTo3D {
         val out = Mask(m.w, m.h)
         for (i in b.indices) out.data[i] = b[i] > 0.5f
         return Segmentation.largestComponent(Segmentation.fillHoles(out)).takeIf { it.area > m.area / 3 } ?: m
+    }
+
+    /** Pixels na borda do recorte (e fora dele) recebem a cor do pixel interno mais próximo. */
+    private fun bleed(t: Texture, mask: Mask, bb: IntArray): Texture {
+        val w = t.width; val h = t.height
+        val r = max(2, max(w, h) / 160)
+        val known = BooleanArray(w * h) { i -> mask[bb[0] + i % w, bb[1] + i / w] }
+        val core = Segmentation.erode(Mask(w, h, known), r)
+        if (core.area < 16) return t
+        val px = t.pixels.copyOf()
+        val done = core.data.copyOf()
+        val queue = IntArray(w * h); var head = 0; var tail = 0
+        for (i in done.indices) if (done[i]) queue[tail++] = i
+        while (head < tail) {
+            val i = queue[head++]; val x = i % w; val y = i / w
+            val nb = intArrayOf(if (x > 0) i - 1 else -1, if (x < w - 1) i + 1 else -1, if (y > 0) i - w else -1, if (y < h - 1) i + w else -1)
+            for (j in nb) if (j >= 0 && !done[j]) { done[j] = true; px[j] = px[i]; queue[tail++] = j }
+        }
+        return Texture(w, h, px)
+    }
+
+    private fun frontBackAtlas(t: Texture): Texture {
+        val w = t.width; val h = t.height
+        // verso: média local grande (mantém as cores, some com rosto/letras) e um pouco mais escuro
+        val r = max(3, max(w, h) / 25)
+        val ch = Array(3) { c -> FloatArray(w * h) { i -> ((t.pixels[i] shr (16 - 8 * c)) and 255).toFloat() } }
+        val blurred = ch.map { boxBlur(boxBlur(boxBlur(it, w, h, r), w, h, r), w, h, r) }
+        val out = IntArray(2 * w * h)
+        for (y in 0 until h) for (x in 0 until w) {
+            val i = y * w + x
+            out[y * 2 * w + x] = t.pixels[i] or (0xFF shl 24)
+            val rr = (blurred[0][i] * 0.88f).toInt().coerceIn(0, 255)
+            val gg = (blurred[1][i] * 0.88f).toInt().coerceIn(0, 255)
+            val bb = (blurred[2][i] * 0.88f).toInt().coerceIn(0, 255)
+            out[y * 2 * w + w + x] = (0xFF shl 24) or (rr shl 16) or (gg shl 8) or bb
+        }
+        return Texture(2 * w, h, out)
     }
 
     private fun crop(pixels: IntArray, w: Int, bb: IntArray): Texture {
@@ -183,7 +226,7 @@ object PhotoTo3D {
      * h = sqrt(u), com Δu = -2 e u = 0 na borda (seção transversal circular).
      * No modo extrusão a altura é constante com chanfro.
      */
-    private fun gridSolid(pixels: IntArray, w: Int, mask: Mask, bb: IntArray, opt: PhotoOptions, extrude: Boolean): Mesh {
+    private fun gridSolid(pixels: IntArray, w: Int, imgH: Int, mask: Mask, bb: IntArray, opt: PhotoOptions, extrude: Boolean): Mesh {
         val bw = bb[2] - bb[0] + 1; val bh = bb[3] - bb[1] + 1
         val cell = max(bw, bh).toFloat() / opt.resolution
         val gw = ceil(bw / cell).toInt() + 1; val gh = ceil(bh / cell).toInt() + 1
@@ -212,11 +255,13 @@ object PhotoTo3D {
             boundary[k] = b
         }
         val dist = chamfer(inside, gw, gh)
-        val height = FloatArray(gw * gh)
+        val height = FloatArray(gw * gh)      // frente
+        val heightBack = FloatArray(gw * gh)  // verso
         if (extrude) {
             val t = 0.06f * max(gw, gh) * opt.thickness
             val bevel = max(2f, t * 0.35f)
             for (k in height.indices) if (inside[k] && !boundary[k]) height[k] = t * min(1f, (dist[k] - 1f) / bevel).coerceAtLeast(0.2f)
+            height.copyInto(heightBack)
         } else {
             // Poisson por SOR, inicializado com d²
             val u = FloatArray(gw * gh)
@@ -233,10 +278,39 @@ object PhotoTo3D {
             }
             // passa-alta da luminância para micro-relevo
             val blur = boxBlur(lum, gw, gh, 4)
+            val depth = opt.depth
+            // profundidade da IA normalizada dentro do objeto (percentis 5..95, robusto a ruído)
+            var dn: FloatArray? = null
+            if (depth != null) {
+                val d = FloatArray(gw * gh)
+                val vals = ArrayList<Float>()
+                for (j in 0 until gh) for (i in 0 until gw) {
+                    val q = j * gw + i
+                    if (!inside[q]) continue
+                    val px = bb[0] + i * cell; val py = bb[1] + j * cell
+                    d[q] = depth.sample(px / w, py / imgH); vals += d[q]
+                }
+                vals.sort()
+                if (vals.size > 20) {
+                    val lo = vals[vals.size * 5 / 100]; val hi = vals[vals.size * 95 / 100]
+                    if (hi - lo > 1e-6f) dn = FloatArray(gw * gh) { q -> ((d[q] - lo) / (hi - lo)).coerceIn(0f, 1f) }
+                }
+            }
+            val relief = 0.22f * max(gw, gh)
             for (k in u.indices) if (inside[k] && !boundary[k]) {
                 val base = sqrt(max(0f, u[k]))
                 val hp = (lum[k] - blur[k])
-                height[k] = (base * 0.85f + opt.detail * hp * min(1f, base / 4f) * max(gw, gh) * 0.05f) * opt.thickness
+                val micro = opt.detail * hp * min(1f, base / 4f) * max(gw, gh) * 0.05f
+                if (dn != null) {
+                    // frente: forma da IA (o que está mais perto "sai" mais) sobre uma base inflada;
+                    // perto da borda a influência cai para fechar a malha sem degraus
+                    val ramp = min(1f, (dist[k] - 1f) / 5f).coerceAtLeast(0f)
+                    height[k] = (base * 0.5f + dn[k] * relief * ramp + micro * 0.5f) * opt.thickness
+                    heightBack[k] = base * 0.75f * opt.thickness
+                } else {
+                    height[k] = (base * 0.85f + micro) * opt.thickness
+                    heightBack[k] = height[k]
+                }
             }
         }
 
@@ -251,8 +325,10 @@ object PhotoTo3D {
             if (!inside[q]) continue
             val x = (i - (gw - 1) / 2f) * k; val y = (gh - 1 - j) * k
             val u = i / (gw - 1f); val v = j / (gh - 1f)
-            front[q] = b.vertex(x, y, height[q] * k, u, v)
-            back[q] = if (boundary[q]) front[q] else b.vertex(x, y, -height[q] * k, u, v)
+            // atlas: frente na metade esquerda da textura, verso na direita
+            front[q] = b.vertex(x, y, height[q] * k, u * 0.5f, v)
+            // na borda a posição é a mesma da frente (malha continua fechada), mas com a UV do verso
+            back[q] = b.vertex(x, y, if (boundary[q]) height[q] * k else -heightBack[q] * k, 0.5f + u * 0.5f, v)
         }
         for (j in 0 until gh - 1) for (i in 0 until gw - 1) {
             // ordem anti-horária vista da frente: a(sup-esq), d(inf-esq), c(inf-dir), bq(sup-dir)
