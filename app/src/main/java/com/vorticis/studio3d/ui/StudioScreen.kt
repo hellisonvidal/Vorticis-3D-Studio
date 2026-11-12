@@ -84,6 +84,7 @@ import com.vorticis.studio3d.R
 import com.vorticis.studio3d.StudioViewModel
 import com.vorticis.studio3d.UiEvent
 import com.vorticis.studio3d.core.export.ExportFormat
+import com.vorticis.studio3d.core.photo.CaptureLayout
 import com.vorticis.studio3d.core.photo.PhotoMode
 import com.vorticis.studio3d.gl.ModelSurfaceView
 import kotlinx.coroutines.launch
@@ -99,20 +100,26 @@ fun StudioScreen(vm: StudioViewModel) {
     var showExport by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
     var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    var appendNext by remember { mutableStateOf(false) }
 
     val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val uri = cameraUri
-        if (ok && uri != null) vm.onPhoto(uri)
+        if (ok && uri != null) vm.onPhoto(uri, append = appendNext)
     }
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) vm.onPhoto(uri)
+    val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(16)) { uris ->
+        if (uris.isNotEmpty()) vm.onPhotos(uris, append = appendNext)
+    }
+    fun openGallery(append: Boolean) {
+        appendNext = append
+        pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
     }
     val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         val text = r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
         if (!text.isNullOrBlank()) vm.send(text)
     }
 
-    fun openCamera() {
+    fun openCamera(append: Boolean = false) {
+        appendNext = append
         val dir = File(context.cacheDir, "captures").apply { mkdirs() }
         val f = File(dir, "foto_${System.currentTimeMillis()}.jpg")
         val uri = FileProvider.getUriForFile(context, context.packageName + ".files", f)
@@ -137,7 +144,7 @@ fun StudioScreen(vm: StudioViewModel) {
         vm.eventFlow.collect { e ->
             when (e) {
                 is UiEvent.Share -> context.startActivity(e.intent)
-                is UiEvent.OpenCamera -> openCamera()
+                is UiEvent.OpenCamera -> openCamera(false)
                 is UiEvent.OpenExport -> showExport = true
                 is UiEvent.Snack -> scope.launch {
                     val r = snackbar.showSnackbar(e.text, actionLabel = if (e.share != null) "Compartilhar" else null, duration = SnackbarDuration.Long)
@@ -227,17 +234,74 @@ fun StudioScreen(vm: StudioViewModel) {
                     }
                 }
                 if (vm.hasPhoto) {
-                    LazyRow(
-                        Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp),
-                    ) {
-                        items(PhotoMode.entries) { m ->
-                            FilterChip(
-                                selected = vm.photoMode == m,
-                                onClick = { vm.selectPhotoMode(m) },
-                                label = { Text(m.label, fontSize = 12.sp) },
-                            )
+                    Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp)) {
+                        // barra de ângulos: várias fotos do mesmo objeto
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            item {
+                                Surface(color = Color(0xAA000000), shape = RoundedCornerShape(8.dp)) {
+                                    Text(
+                                        if (vm.photoCount > 1) "${vm.photoCount} fotos" else "1 foto",
+                                        Modifier.padding(horizontal = 8.dp, vertical = 6.dp), fontSize = 12.sp, color = Color.White,
+                                    )
+                                }
+                            }
+                            item {
+                                AssistChip(
+                                    onClick = { openCamera(true) },
+                                    label = { Text("+ Ângulo (câmera)", fontSize = 12.sp) },
+                                    leadingIcon = { Icon(painterResource(R.drawable.ic_camera), null, Modifier.size(16.dp)) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                                )
+                            }
+                            item {
+                                AssistChip(
+                                    onClick = { openGallery(true) },
+                                    label = { Text("+ Da galeria", fontSize = 12.sp) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = Color(0xCC242833)),
+                                )
+                            }
+                            if (vm.photoCount > 1) item {
+                                AssistChip(
+                                    onClick = vm::removeLastPhoto,
+                                    label = { Text("Remover última", fontSize = 12.sp) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = Color(0xCC242833)),
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        // modos: com uma foto escolhe a técnica; com várias, como foram tiradas
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp),
+                        ) {
+                            if (vm.photoCount > 1) {
+                                items(CaptureLayout.entries) { l ->
+                                    FilterChip(
+                                        selected = vm.captureLayout == l && vm.photoMode == PhotoMode.MULTIVIEW,
+                                        onClick = { vm.selectCaptureLayout(l) },
+                                        label = { Text(l.label, fontSize = 12.sp) },
+                                    )
+                                }
+                                item {
+                                    FilterChip(
+                                        selected = vm.photoMode != PhotoMode.MULTIVIEW,
+                                        onClick = { vm.selectPhotoMode(PhotoMode.AUTO) },
+                                        label = { Text("Só a 1ª foto", fontSize = 12.sp) },
+                                    )
+                                }
+                            } else {
+                                items(PhotoMode.entries.filter { it != PhotoMode.MULTIVIEW }) { m ->
+                                    FilterChip(
+                                        selected = vm.photoMode == m,
+                                        onClick = { vm.selectPhotoMode(m) },
+                                        label = { Text(m.label, fontSize = 12.sp) },
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -290,9 +354,9 @@ fun StudioScreen(vm: StudioViewModel) {
                     .padding(horizontal = 6.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = ::openCamera) { Icon(painterResource(R.drawable.ic_camera), "Tirar foto") }
-                IconButton(onClick = { pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) {
-                    Icon(painterResource(R.drawable.ic_gallery), "Escolher da galeria")
+                IconButton(onClick = { openCamera(false) }) { Icon(painterResource(R.drawable.ic_camera), "Tirar foto (nova)") }
+                IconButton(onClick = { openGallery(false) }) {
+                    Icon(painterResource(R.drawable.ic_gallery), "Escolher uma ou várias fotos")
                 }
                 OutlinedTextField(
                     value = input,

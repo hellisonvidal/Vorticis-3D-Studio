@@ -1,6 +1,6 @@
 # Vorticis 3D Studio
 
-App Android que cria modelos 3D **a partir de uma foto** ou de **instruções em português**, e exporta em **12 formatos**. Tudo roda **no próprio celular**, sem servidor e sem internet.
+App Android que cria modelos 3D **a partir de uma ou várias fotos** ou de **instruções em português**, e exporta em **12 formatos**. Tudo roda **no próprio celular**, sem servidor e sem internet.
 
 ## Instalar no celular (sem computador)
 
@@ -26,6 +26,15 @@ Todas as versões são assinadas com a mesma chave, então dá para atualizar se
 | **Relevo** | Mapa de altura pela luminosidade | litofanias, quadros, medalhas |
 
 A textura é a própria foto. As malhas geradas são **fechadas** (*watertight*), prontas para impressão 3D.
+
+### 1b. Várias fotos → 3D (forma real, inclusive o verso)
+Depois da primeira foto, toque em **"+ Ângulo"** e fotografe andando **para a sua direita** ao redor do objeto, sempre na **mesma distância e altura**. Você também pode escolher várias fotos de uma vez na galeria, ou compartilhar várias fotos com o app.
+
+- **Recomendado:** 4 fotos (frente, lado, trás, outro lado) ou 8 fotos em volta (a cada 45°).
+- **Mínimo:** 2 fotos (frente + lado).
+- Técnica: **casco visual** (*shape-from-silhouette*). Cada silhueta esculpe o volume, e a superfície é extraída com *Surface Nets* sobre um campo de distância com sinal. O resultado é uma malha lisa e fechada. A textura é montada projetando as próprias fotos de volta no modelo (frente com a foto da frente, verso com a de trás).
+- Opções na tela: "Ao redor (360°)", "Ao redor (sentido inverso)" (se você andou para a esquerda), "Frente / lado / trás" e "Só a 1ª foto". Por voz ou texto: *"fotos no sentido inverso"*.
+- Limitação do método: cavidades que nenhuma silhueta mostra (o interior de uma caneca, por exemplo) ficam preenchidas.
 
 ### 2. Texto → 3D (a "IA própria")
 A **Vorticis Mind** é um interpretador de linguagem natural (PT-BR e EN) que roda offline. Ela entende:
@@ -106,6 +115,6 @@ O APK sai em `app/build/outputs/apk/release/app-release.apk`. Requer JDK 17 e An
 
 ## Limitações honestas e próximos passos
 
-- Com uma única foto, a parte de trás do objeto é **estimada**: a frente recebe a foto e o verso é espelhado. Para fidelidade de nível Meshy/Tripo seria preciso um modelo de difusão multivista ou de reconstrução 3D (TripoSR, SF3D, TRELLIS). Esses modelos pedem GPU com 6 GB de VRAM ou mais e ainda não rodam bem em celular.
+- Com uma única foto, a parte de trás do objeto é **estimada**: a frente recebe a foto e o verso é espelhado. Com várias fotos, o verso é real, mas os ângulos são presumidos (fotos igualmente espaçadas); fotos tortas ou a distâncias diferentes deformam o resultado. Para fidelidade de nível Meshy/Tripo seria preciso um modelo de difusão multivista ou de reconstrução 3D (TripoSR, SF3D, TRELLIS). Esses modelos pedem GPU com 6 GB de VRAM ou mais e ainda não rodam bem em celular.
 - A Vorticis Mind entende frases com objetos e atributos conhecidos. Ela não é um LLM. Um próximo passo é integrar um LLM local (por exemplo, Gemma via MediaPipe LLM Inference) para ampliar o vocabulário, gerando o mesmo plano de cena que a Mind já executa.
 - A chave de assinatura incluída (`app/vorticis-test.keystore`) serve só para testes. Para publicar na Play Store, gere uma chave privada.

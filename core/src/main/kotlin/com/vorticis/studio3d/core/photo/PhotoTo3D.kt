@@ -20,6 +20,7 @@ enum class PhotoMode(val label: String, val description: String) {
     LATHE("Revolução", "Gira o contorno em torno do eixo (vasos, garrafas, copos, luminárias)"),
     EXTRUDE("Extrusão", "Recorte com espessura e chanfro (logos, placas, chaveiros)"),
     RELIEF("Relevo", "Placa em alto-relevo pela luminosidade da foto (litofania/quadro)"),
+    MULTIVIEW("Várias fotos", "Cruza as silhuetas de fotos tiradas ao redor do objeto (forma real, inclusive o verso)"),
 }
 
 data class PhotoOptions(

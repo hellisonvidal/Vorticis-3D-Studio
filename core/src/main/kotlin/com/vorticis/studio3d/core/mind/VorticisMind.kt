@@ -32,6 +32,8 @@ data class MindResult(
     /** quando diferente de null, o app deve reconstruir o modelo da última foto neste modo */
     val photoMode: PhotoMode? = null,
     val photoThickness: Float? = null,
+    /** como as várias fotos foram tiradas (quando o usuário corrige o sentido da volta) */
+    val photoLayout: com.vorticis.studio3d.core.photo.CaptureLayout? = null,
     val special: Special? = null,
     val changed: Boolean = true,
 )
@@ -125,6 +127,15 @@ class VorticisMind(private val textRasterizer: TextRasterizer? = null) {
                 has(text, " mais gross", " mais espess", " mais volume", " mais gordo") -> 1.4f
                 has(text, " mais fin", " menos gross", " menos volume", " mais achat") -> 0.7f
                 else -> null
+            }
+            val layout = when {
+                has(text, " esquerda", " sentido inverso", " sentido contrario", " anti horario", " anti-horario", " ao contrario") -> com.vorticis.studio3d.core.photo.CaptureLayout.AROUND_LEFT
+                has(text, " frente", " lado", " tras ") && has(text, " fotos") -> com.vorticis.studio3d.core.photo.CaptureLayout.ORTHO
+                has(text, " direita", " ao redor", " em volta", " 360") -> com.vorticis.studio3d.core.photo.CaptureLayout.AROUND
+                else -> null
+            }
+            if (layout != null && mode == null) {
+                return MindResult(scene, "Reconstruindo as fotos considerando: ${layout.label}…", photoMode = PhotoMode.MULTIVIEW, photoLayout = layout, changed = false)
             }
             if (mode != null || thick != null) {
                 return MindResult(scene, "Reconstruindo o modelo da foto" + (mode?.let { " no modo ${it.label}" } ?: "") + "…", photoMode = mode ?: PhotoMode.AUTO, photoThickness = thick, changed = false)
@@ -727,7 +738,8 @@ class VorticisMind(private val textRasterizer: TextRasterizer? = null) {
         appendLine("EDITAR: \"pinte de verde\", \"pinte o telhado de preto\", \"deixe 2 vezes maior\", \"mais alto\", \"gire 90 graus\", ")
         appendLine("\"mova para a direita\", \"duplique 3 vezes\", \"espelhe\", \"suavize\", \"remova a cadeira\", \"desfazer\".")
         appendLine()
-        appendLine("FOTO: toque na câmera e fotografe um objeto. Depois diga \"transforme a foto em vaso\", \"foto em relevo\", \"extrusão da foto\" ou \"foto com mais volume\".")
+        appendLine("FOTO ÚNICA: toque na câmera e fotografe um objeto. Depois diga \"transforme a foto em vaso\", \"foto em relevo\", \"extrusão da foto\" ou \"foto com mais volume\".")
+        appendLine("VÁRIAS FOTOS: depois da 1ª foto toque em \"+ Ângulo\" e fotografe andando para a SUA DIREITA ao redor do objeto, mesma distância e altura: 4 fotos (frente, lado, trás, outro lado) ou 8 ao redor. Também dá para escolher várias fotos na galeria. Se girou para a esquerda, diga \"fotos no sentido inverso\".")
         appendLine()
         append("Objetos que conheço: ")
         append(ObjectLibrary.objects.joinToString(", ") { it.label })

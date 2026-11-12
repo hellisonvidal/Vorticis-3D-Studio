@@ -16,7 +16,11 @@ import com.vorticis.studio3d.core.mind.Special
 import com.vorticis.studio3d.core.mind.VorticisMind
 import com.vorticis.studio3d.core.model.Node
 import com.vorticis.studio3d.core.model.Scene
+import com.vorticis.studio3d.core.photo.CaptureLayout
+import com.vorticis.studio3d.core.photo.MultiView
+import com.vorticis.studio3d.core.photo.MultiViewOptions
 import com.vorticis.studio3d.core.photo.PhotoMode
+import com.vorticis.studio3d.core.photo.PhotoView
 import com.vorticis.studio3d.core.photo.PhotoOptions
 import com.vorticis.studio3d.core.photo.PhotoTo3D
 import com.vorticis.studio3d.export.ExportManager
@@ -53,6 +57,11 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var hasPhoto by mutableStateOf(false)
         private set
+    /** quantas fotos (ângulos) estão na sessão atual */
+    var photoCount by mutableStateOf(0)
+        private set
+    var captureLayout by mutableStateOf(CaptureLayout.AROUND)
+        private set
     var canUndo by mutableStateOf(false)
         private set
     var canRedo by mutableStateOf(false)
@@ -67,7 +76,8 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
 
     private val history = ArrayList<Scene>().apply { add(Scene()) }
     private var historyIndex = 0
-    private var photo: PhotoInput? = null
+    private val photos = ArrayList<PhotoInput>()
+    private val photo: PhotoInput? get() = photos.firstOrNull()
     private var photoThickness = 1f
 
     val suggestions = listOf(
@@ -128,7 +138,8 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
                         messages += ChatMessage(false, "Ainda não há foto. Toque no botão da câmera ou da galeria primeiro.")
                     } else {
                         res.photoThickness?.let { photoThickness = (photoThickness * it).coerceIn(0.3f, 3f) }
-                        rebuildPhoto(requestedMode)
+                        res.photoLayout?.let { captureLayout = it }
+                        rebuildPhoto(if (requestedMode == PhotoMode.MULTIVIEW && photos.size < 2) photoMode else requestedMode)
                     }
                 } else if (res.changed) commit(res.scene)
             } catch (e: Throwable) {
@@ -139,22 +150,37 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun onPhoto(uri: Uri) {
-        if (busy != null) return
-        busy = "Analisando a foto…"
-        messages += ChatMessage(true, "📷 Foto enviada")
+    /** Uma foto: [append] = true acrescenta um ângulo à sessão atual (várias fotos). */
+    fun onPhoto(uri: Uri, append: Boolean = false) = onPhotos(listOf(uri), append)
+
+    /** Uma ou várias fotos (galeria com seleção múltipla ou "+ Ângulo"). */
+    fun onPhotos(uris: List<Uri>, append: Boolean = false) {
+        if (busy != null || uris.isEmpty()) return
+        val list = uris.take(16)
+        busy = "Analisando ${if (list.size > 1) "${list.size} fotos" else "a foto"}…"
+        messages += ChatMessage(true, if (list.size > 1) "📷 ${list.size} fotos enviadas" else if (append) "📷 Novo ângulo" else "📷 Foto enviada")
         viewModelScope.launch {
             try {
-                val input = withContext(Dispatchers.IO) {
-                    val bmp = PhotoLoader.load(getApplication(), uri)
-                    busy = "Separando o objeto do fundo…"
-                    PhotoLoader.segment(bmp).also { bmp.recycle() }
+                val inputs = ArrayList<PhotoInput>()
+                for ((i, uri) in list.withIndex()) {
+                    busy = if (list.size > 1) "Recortando foto ${i + 1} de ${list.size}…" else "Separando o objeto do fundo…"
+                    inputs += withContext(Dispatchers.IO) {
+                        val bmp = PhotoLoader.load(getApplication(), uri)
+                        PhotoLoader.segment(bmp).also { bmp.recycle() }
+                    }
                 }
-                photo = input
+                if (!append) { photos.clear(); photoThickness = 1f }
+                photos += inputs
+                if (photos.size > 16) photos.subList(0, photos.size - 16).clear()
                 hasPhoto = true
-                photoThickness = 1f
-                messages += ChatMessage(false, "Recortei o objeto usando ${input.segmentedBy}.")
-                rebuildPhoto(photoMode)
+                photoCount = photos.size
+                val how = inputs.map { it.segmentedBy }.distinct().joinToString(" e ")
+                messages += ChatMessage(false, "Recortei ${if (inputs.size > 1) "${inputs.size} fotos" else "o objeto"} usando $how.")
+                if (photos.size >= 2) rebuildPhoto(PhotoMode.MULTIVIEW)
+                else {
+                    rebuildPhoto(if (photoMode == PhotoMode.MULTIVIEW) PhotoMode.AUTO else photoMode)
+                    messages += ChatMessage(false, "Quer o objeto inteiro, com o verso real? Toque em \"+ Ângulo\" e fotografe andando para a SUA DIREITA ao redor dele (mesma distância e altura): 4 fotos (frente, lado, trás, outro lado) ou 8 em volta.")
+                }
             } catch (e: Throwable) {
                 messages += ChatMessage(false, "Não consegui processar a foto: ${e.message ?: e.javaClass.simpleName}")
             } finally {
@@ -172,17 +198,41 @@ class StudioViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun selectCaptureLayout(layout: CaptureLayout) {
+        captureLayout = layout
+        if (photos.size >= 2 && busy == null) {
+            viewModelScope.launch {
+                try { rebuildPhoto(PhotoMode.MULTIVIEW) } finally { busy = null }
+            }
+        }
+    }
+
+    /** Remove o último ângulo adicionado. */
+    fun removeLastPhoto() {
+        if (photos.size <= 1 || busy != null) return
+        photos.removeAt(photos.size - 1)
+        photoCount = photos.size
+        messages += ChatMessage(false, "Removi a última foto. Agora são ${photos.size}.")
+        viewModelScope.launch {
+            try { rebuildPhoto(if (photos.size >= 2) PhotoMode.MULTIVIEW else PhotoMode.AUTO) } finally { busy = null }
+        }
+    }
+
     private suspend fun rebuildPhoto(mode: PhotoMode) {
         val p = photo ?: return
-        photoMode = mode
         busy = "Modelando em 3D…"
+        val multi = mode == PhotoMode.MULTIVIEW && photos.size >= 2
+        photoMode = if (multi) PhotoMode.MULTIVIEW else mode
+        val snapshot = photos.toList()
         val result = withContext(Dispatchers.Default) {
-            PhotoTo3D.build(p.pixels, p.width, p.height, p.mask, PhotoOptions(mode = mode, thickness = photoThickness))
+            if (multi) MultiView.build(snapshot.map { PhotoView(it.pixels, it.width, it.height, it.mask) }, MultiViewOptions(layout = captureLayout))
+            else PhotoTo3D.build(p.pixels, p.width, p.height, p.mask, PhotoOptions(mode = mode, thickness = photoThickness))
         }
-        val gid = 1
-        val node = Node("Foto_${result.mode.name.lowercase()}", result.mesh, result.material, gid, "foto", "corpo")
+        val node = Node("Foto_${result.mode.name.lowercase()}", result.mesh, result.material, 1, "foto", "corpo")
         commit(Scene(listOf(node), nextGroup = 2))
-        messages += ChatMessage(false, "${result.explanation} (${result.mesh.triangleCount} triângulos). Diga \"pinte de azul\", \"mais volume\" ou troque o modo abaixo.")
+        val tip = if (multi) "Se o formato ficou estranho, confira o sentido da volta nos botões abaixo, ou adicione mais ângulos."
+        else "Diga \"pinte de azul\", \"mais volume\" ou troque o modo abaixo."
+        messages += ChatMessage(false, "${result.explanation} (${result.mesh.triangleCount} triângulos). $tip")
     }
 
     private fun baseName(): String {

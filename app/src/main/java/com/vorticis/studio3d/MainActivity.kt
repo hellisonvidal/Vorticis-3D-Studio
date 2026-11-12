@@ -30,11 +30,20 @@ class MainActivity : ComponentActivity() {
         handleShare(intent)
     }
 
-    /** Permite "Compartilhar foto → Vorticis 3D Studio" a partir da galeria. */
+    /** Permite "Compartilhar foto(s) → Vorticis 3D Studio" a partir da galeria. */
     private fun handleShare(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) return
-        val uri: Uri? = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
-        uri?.let { vm.onPhoto(it) }
+        if (intent?.type?.startsWith("image/") != true) return
+        when (intent.action) {
+            Intent.ACTION_SEND -> {
+                val uri: Uri? = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                uri?.let { vm.onPhoto(it) }
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                val uris: List<Uri>? = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                uris?.let { vm.onPhotos(it) }
+            }
+        }
     }
 }
