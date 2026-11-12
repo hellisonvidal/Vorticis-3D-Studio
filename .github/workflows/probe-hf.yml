@@ -14,6 +14,7 @@ on:
 
 jobs:
   probe:
+    if: github.event.inputs.try_generate != 'kotlin'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -26,3 +27,26 @@ jobs:
         env:
           TRY_GENERATE: ${{ github.event.inputs.try_generate }}
         run: python tools/probe/probe_hf.py ${{ github.event.inputs.spaces }}
+
+  cloud-kotlin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.event.inputs.try_generate == 'kotlin'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Geração real pela nuvem grátis (cliente Kotlin do app)
+        env:
+          VORTICIS_CLOUD_TEST: "1"
+        run: ./gradlew :core:test --tests '*CloudTest*' --no-daemon -i | grep -E "nuvem:|progresso:|FAILED|Exception" || true
+      - name: Publicar resultado para inspeção
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la core/build/test-exports/ || true
+          gh release delete teste-nuvem -y --cleanup-tag || true
+          gh release create teste-nuvem --prerelease --title "Teste da nuvem (temporário)" --notes "Arquivos de teste gerados pelo CI" core/build/test-exports/nuvem_*.glb
