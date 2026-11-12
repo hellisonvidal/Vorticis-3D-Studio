@@ -31,6 +31,13 @@ Todas as versões são assinadas com a mesma chave, então dá para atualizar se
 
 A textura é a própria foto. As malhas geradas são **fechadas** (*watertight*), prontas para impressão 3D.
 
+### ✨ Qualidade máxima (nuvem grátis, opcional)
+Para chegar perto do Meshy e do Tripo, o app pode enviar a foto ao **TRELLIS** (IA 3D generativa de código aberto da Microsoft), publicado gratuitamente no Hugging Face. Ele "imagina" os lados e as costas e devolve um GLB com textura, que entra na cena do app: dá para editar por comando e exportar nos 12 formatos.
+- **Sem mensalidade:** usa a GPU pública gratuita do Hugging Face, com limite diário. Um token gratuito de huggingface.co (menu ⋮ → "Nuvem grátis: token") aumenta a sua cota.
+- **Privacidade:** só o **recorte do objeto** (PNG com fundo transparente) é enviado, nunca a foto inteira. Como é um serviço público de terceiros, o app avisa antes do primeiro uso.
+- **Tempo:** de 30 s a 3 min, dependendo da fila. Sem internet ou sem cota, o modo do aparelho continua funcionando.
+- **Teste real:** o cliente Kotlin do app é testado contra o serviço pelo GitHub Actions (workflow "Sondar nuvem grátis").
+
 ### 1a. IA de profundidade (foto única)
 O APK inclui o **Depth Anything V2 Small** (quantizado, licença Apache-2.0), executado no aparelho com **ONNX Runtime**. Ele estima a distância de cada pixel até a câmera. A frente do modelo segue esse relevo (rosto, braços e joelhos "saem" de verdade), e a silhueta inflada forma o verso. O verso usa uma versão suavizada da foto, para não repetir o rosto ou a estampa nas costas. As bordas recebem a cor de dentro do objeto, sem a "franja" do fundo. O modelo é baixado pelo GitHub Actions na hora de gerar o APK e testado lá com uma cena sintética.
 
