@@ -41,7 +41,7 @@ class CloudTest {
     /** Geração real na nuvem gratuita (só roda no GitHub Actions com VORTICIS_CLOUD_TEST=1). */
     @Test fun realCloudGeneration() {
         if (System.getenv("VORTICIS_CLOUD_TEST") != "1") { println("nuvem: teste pulado"); return }
-        val img = File("../tools/probe/teste_foguete.png").readBytes()
+        val img = File("../tools/probe/teste_foguete_recorte.png").readBytes()
         val t0 = System.currentTimeMillis()
         val glb = CloudGenerator.generate(img, "image/png", System.getenv("HF_TOKEN"), progress = { m, f -> println("  progresso: $m ${f ?: ""}") })
         val scene = GlbImporter.import(glb, decoder)
