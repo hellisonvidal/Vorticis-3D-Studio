@@ -21,7 +21,7 @@ import kotlin.math.tan
 /** Renderizador OpenGL ES 3.0 com iluminação PBR simplificada, chão em grade e sombra suave. */
 class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Renderer {
 
-    private class GpuMesh(val vao: Int, val vbo: Int, val ibo: Int, val count: Int, val color: FloatArray, val metallic: Float, val roughness: Float, val tex: Int)
+    private class GpuMesh(val vao: Int, val vbo: Int, val ibo: Int, val count: Int, val color: FloatArray, val metallic: Float, val roughness: Float, val tex: Int, val photo: Boolean)
 
     private val pending = AtomicReference<Scene?>(null)
     private val pendingCloud = AtomicReference<Pair<Cloud?, Boolean>?>(null) // (nuvem, nova sessão?)
@@ -161,11 +161,13 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
         GL.glUniform3f(GL.glGetUniformLocation(prog, "uCam"), ex, ey, ez)
         val uColor = GL.glGetUniformLocation(prog, "uColor")
         val uMR = GL.glGetUniformLocation(prog, "uMR")
+        val uPhoto = GL.glGetUniformLocation(prog, "uPhoto")
         GL.glUniform1i(GL.glGetUniformLocation(prog, "uTex"), 0)
         GL.glActiveTexture(GL.GL_TEXTURE0)
         for (m in meshes) {
             GL.glUniform4fv(uColor, 1, m.color, 0)
             GL.glUniform2f(uMR, m.metallic, m.roughness)
+            GL.glUniform1f(uPhoto, if (m.photo) 1f else 0f)
             GL.glBindTexture(GL.GL_TEXTURE_2D, m.tex)
             GL.glBindVertexArray(m.vao)
             GL.glDrawElements(GL.GL_TRIANGLES, m.count, GL.GL_UNSIGNED_INT, 0)
@@ -270,7 +272,7 @@ class ModelRenderer(private val requestRender: () -> Unit) : GLSurfaceView.Rende
             GL.glBindVertexArray(0)
             val mat = n.material
             val tex = mat.texture?.let { t -> textures.getOrPut(t) { uploadTexture(t) } } ?: white
-            meshes += GpuMesh(ids[0], bufs[0], bufs[1], mesh.indices.size, floatArrayOf(mat.r, mat.g, mat.b, 1f), mat.metallic, mat.roughness, tex)
+            meshes += GpuMesh(ids[0], bufs[0], bufs[1], mesh.indices.size, floatArrayOf(mat.r, mat.g, mat.b, 1f), mat.metallic, mat.roughness, tex, mat.name == "Foto")
         }
         val b = scene.bounds()
         if (animating) { yaw = 0.35f; pitch = 0.15f }
@@ -336,7 +338,7 @@ void main() {
         private const val FS = """#version 300 es
 precision highp float;
 in vec3 vPos; in vec3 vNor; in vec2 vUv;
-uniform vec4 uColor; uniform vec2 uMR; uniform vec3 uCam; uniform sampler2D uTex; uniform float uAlpha;
+uniform vec4 uColor; uniform vec2 uMR; uniform vec3 uCam; uniform sampler2D uTex; uniform float uAlpha; uniform float uPhoto;
 out vec4 frag;
 vec3 toLin(vec3 c) { return pow(c, vec3(2.2)); }
 vec3 sky(vec3 d) {
@@ -349,28 +351,35 @@ void main() {
     vec3 N = normalize(vNor);
     vec3 V = normalize(uCam - vPos);
     if (dot(N, V) < 0.0) N = -N;
-    vec3 L1 = normalize(vec3(0.5, 0.9, 0.6));
-    vec3 L2 = normalize(vec3(-0.7, 0.35, -0.4));
+    // iluminação de estúdio: luz principal, preenchimento, contra-luz e ambiente hemisférico
+    vec3 L1 = normalize(vec3(0.45, 0.8, 0.75));
+    vec3 L2 = normalize(vec3(-0.75, 0.35, 0.3));
+    vec3 L3 = normalize(vec3(0.0, 0.5, -1.0));
     vec3 F0 = mix(vec3(0.04), base, metal);
     vec3 diff = base * (1.0 - metal);
-    float shin = mix(256.0, 4.0, rough);
+    float shin = mix(256.0, 6.0, rough);
     vec3 col = vec3(0.0);
-    vec3 Ls[2]; Ls[0] = L1; Ls[1] = L2;
-    vec3 Lc[2]; Lc[0] = vec3(2.6, 2.5, 2.35); Lc[1] = vec3(0.6, 0.7, 0.9);
-    for (int i = 0; i < 2; i++) {
+    vec3 Ls[3]; Ls[0] = L1; Ls[1] = L2; Ls[2] = L3;
+    vec3 Lc[3]; Lc[0] = vec3(1.55, 1.5, 1.42); Lc[1] = vec3(0.45, 0.5, 0.6); Lc[2] = vec3(0.55, 0.6, 0.7);
+    for (int i = 0; i < 3; i++) {
         vec3 L = Ls[i];
         float nl = max(dot(N, L), 0.0);
+        // difusa "embrulhada": sombras suaves, sem lado totalmente preto
+        float wrap = max((dot(N, L) + 0.35) / 1.35, 0.0);
         vec3 H = normalize(L + V);
-        float spec = pow(max(dot(N, H), 0.0), shin) * (shin + 8.0) / 25.0;
-        col += (diff / 3.14159 * 3.14159 * 0.3 + F0 * spec * 0.25) * Lc[i] * nl;
+        float spec = pow(max(dot(N, H), 0.0), shin) * (shin + 8.0) / 40.0;
+        col += (diff * wrap + F0 * spec * nl) * Lc[i];
     }
-    // ambiente hemisférico + reflexo do céu (metais)
     vec3 R = reflect(-V, N);
     float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0);
     vec3 F = F0 + (1.0 - F0) * fres * (1.0 - rough);
-    col += diff * sky(N) * 0.35;
-    col += F * sky(R) * (1.0 - rough * 0.7) * 0.6;
-    col = col / (col + vec3(1.0)) * 1.25; // tonemap suave
+    col += diff * sky(N) * 0.28;
+    col += F * sky(R) * (1.0 - rough * 0.7) * 0.5;
+    // fotos: preserva a cor original (a textura já tem a luz real da cena)
+    col = mix(col, base * 1.05, uPhoto * 0.55);
+    // tonemap ACES (contraste e saturação naturais)
+    col *= 1.1;
+    col = clamp((col * (2.51 * col + 0.03)) / (col * (2.43 * col + 0.59) + 0.14), 0.0, 1.0);
     frag = vec4(pow(col, vec3(1.0 / 2.2)), uAlpha);
 }"""
 

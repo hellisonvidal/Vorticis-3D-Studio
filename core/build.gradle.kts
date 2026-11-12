@@ -24,5 +24,7 @@ tasks.test {
     useJUnit()
     systemProperty("java.awt.headless", "true")
     systemProperty("vorticis.depthModel", rootProject.file("app/src/main/assets/models/depth_anything_v2_small_q.onnx").absolutePath)
+    System.getProperty("vorticis.lab.image")?.let { systemProperty("vorticis.lab.image", it) }
+    System.getProperty("vorticis.lab.mask")?.let { systemProperty("vorticis.lab.mask", it) }
     systemProperty("vorticis.out", layout.buildDirectory.dir("test-exports").get().asFile.absolutePath)
 }

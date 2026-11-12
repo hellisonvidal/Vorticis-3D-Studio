@@ -261,7 +261,7 @@ object PhotoTo3D {
             val t = 0.06f * max(gw, gh) * opt.thickness
             val bevel = max(2f, t * 0.35f)
             for (k in height.indices) if (inside[k] && !boundary[k]) height[k] = t * min(1f, (dist[k] - 1f) / bevel).coerceAtLeast(0.2f)
-            height.copyInto(heightBack)
+            for (k in height.indices) heightBack[k] = -height[k]
         } else {
             // Poisson por SOR, inicializado com d²
             val u = FloatArray(gw * gh)
@@ -279,37 +279,65 @@ object PhotoTo3D {
             // passa-alta da luminância para micro-relevo
             val blur = boxBlur(lum, gw, gh, 4)
             val depth = opt.depth
-            // profundidade da IA normalizada dentro do objeto (percentis 5..95, robusto a ruído)
+            // profundidade da IA amostrada na grade, suavizada e normalizada (percentis 5..95)
             var dn: FloatArray? = null
             if (depth != null) {
                 val d = FloatArray(gw * gh)
                 val vals = ArrayList<Float>()
                 for (j in 0 until gh) for (i in 0 until gw) {
                     val q = j * gw + i
-                    if (!inside[q]) continue
                     val px = bb[0] + i * cell; val py = bb[1] + j * cell
-                    d[q] = depth.sample(px / w, py / imgH); vals += d[q]
+                    d[q] = depth.sample(px / w, py / imgH)
+                    if (inside[q]) vals += d[q]
                 }
                 vals.sort()
                 if (vals.size > 20) {
                     val lo = vals[vals.size * 5 / 100]; val hi = vals[vals.size * 95 / 100]
-                    if (hi - lo > 1e-6f) dn = FloatArray(gw * gh) { q -> ((d[q] - lo) / (hi - lo)).coerceIn(0f, 1f) }
+                    if (hi - lo > 1e-6f) {
+                        val n = FloatArray(gw * gh) { q -> ((d[q] - lo) / (hi - lo)).coerceIn(-0.2f, 1.2f) }
+                        dn = boxBlur(boxBlur(n, gw, gh, 2), gw, gh, 2)
+                    }
                 }
             }
-            val relief = 0.22f * max(gw, gh)
-            for (k in u.indices) if (inside[k] && !boundary[k]) {
-                val base = sqrt(max(0f, u[k]))
-                val hp = (lum[k] - blur[k])
-                val micro = opt.detail * hp * min(1f, base / 4f) * max(gw, gh) * 0.05f
-                if (dn != null) {
-                    // frente: forma da IA (o que está mais perto "sai" mais) sobre uma base inflada;
-                    // perto da borda a influência cai para fechar a malha sem degraus
-                    val ramp = min(1f, (dist[k] - 1f) / 5f).coerceAtLeast(0f)
-                    height[k] = (base * 0.5f + dn[k] * relief * ramp + micro * 0.5f) * opt.thickness
-                    heightBack[k] = base * 0.75f * opt.thickness
-                } else {
+            if (dn != null) {
+                // 1) membrana: interpola a profundidade do CONTORNO para dentro (Laplace) => postura/inclinação
+                val mem = FloatArray(gw * gh)
+                var rimSum = 0f; var rimN = 0
+                for (q in mem.indices) if (boundary[q]) { mem[q] = dn[q]; rimSum += dn[q]; rimN++ }
+                val rimMean = if (rimN > 0) rimSum / rimN else 0.5f
+                for (q in mem.indices) if (inside[q] && !boundary[q]) mem[q] = rimMean
+                repeat(iters) {
+                    for (j in 1 until gh - 1) for (i in 1 until gw - 1) {
+                        val q = j * gw + i
+                        if (!inside[q] || boundary[q]) continue
+                        var s = 0f; var c = 0
+                        if (inside[q - 1]) { s += mem[q - 1]; c++ }; if (inside[q + 1]) { s += mem[q + 1]; c++ }
+                        if (inside[q - gw]) { s += mem[q - gw]; c++ }; if (inside[q + gw]) { s += mem[q + gw]; c++ }
+                        if (c > 0) mem[q] += omega * (s / c - mem[q])
+                    }
+                }
+                val memSm = boxBlur(boxBlur(mem, gw, gh, 5), gw, gh, 5)
+                // 2) relevo: o quanto cada ponto sai em relação ao contorno ao redor (zero na borda)
+                val size = max(gw, gh).toFloat()
+                val pose = 0.20f * size      // amplitude da postura (frente/trás entre partes)
+                val bump = 0.22f * size      // amplitude do relevo interno
+                for (q in u.indices) {
+                    if (!inside[q]) continue
+                    val base = sqrt(max(0f, u[q]))                                    // seção arredondada (Poisson)
+                    // partes finas (dedos, pés) não podem ser deslocadas muito em relação à própria espessura
+                    val zc = ((memSm[q] - rimMean) * pose * opt.thickness).let { z -> if (boundary[q]) z else z }
+                    if (boundary[q]) { height[q] = zc; heightBack[q] = zc; continue }
+                    val relief = ((dn[q] - mem[q]) * bump).coerceIn(-base * 0.4f, base * 0.9f)
+                    height[q] = zc + (base * 0.6f + relief) * opt.thickness
+                    heightBack[q] = zc - base * 0.65f * opt.thickness
+                }
+            } else {
+                val blur = boxBlur(lum, gw, gh, 4)
+                for (k in u.indices) if (inside[k] && !boundary[k]) {
+                    val base = sqrt(max(0f, u[k]))
+                    val micro = opt.detail * (lum[k] - blur[k]) * min(1f, base / 4f) * max(gw, gh) * 0.05f
                     height[k] = (base * 0.85f + micro) * opt.thickness
-                    heightBack[k] = height[k]
+                    heightBack[k] = -height[k]
                 }
             }
         }
@@ -328,7 +356,7 @@ object PhotoTo3D {
             // atlas: frente na metade esquerda da textura, verso na direita
             front[q] = b.vertex(x, y, height[q] * k, u * 0.5f, v)
             // na borda a posição é a mesma da frente (malha continua fechada), mas com a UV do verso
-            back[q] = b.vertex(x, y, if (boundary[q]) height[q] * k else -heightBack[q] * k, 0.5f + u * 0.5f, v)
+            back[q] = b.vertex(x, y, if (boundary[q]) height[q] * k else heightBack[q] * k, 0.5f + u * 0.5f, v)
         }
         for (j in 0 until gh - 1) for (i in 0 until gw - 1) {
             // ordem anti-horária vista da frente: a(sup-esq), d(inf-esq), c(inf-dir), bq(sup-dir)
