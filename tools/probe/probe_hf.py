@@ -10,10 +10,16 @@ SPACES = sys.argv[1].split(",") if len(sys.argv) > 1 else [
 TRY = os.environ.get("TRY_GENERATE", "")
 token = os.environ.get("HF_TOKEN") or None
 
+def make(sp):
+    try:
+        return Client(sp, token=token, verbose=False)
+    except TypeError:
+        return Client(sp, hf_token=token, verbose=False)
+
 for sp in SPACES:
     print("=" * 80, "\n", sp, flush=True)
     try:
-        c = Client(sp, hf_token=token, verbose=False)
+        c = make(sp)
         api = c.view_api(return_format="dict", print_info=False)
         for name, ep in (api.get("named_endpoints") or {}).items():
             params = [(p.get("parameter_name"), p.get("python_type", {}).get("type"), p.get("parameter_default")) for p in ep.get("parameters", [])]
@@ -26,7 +32,7 @@ for sp in SPACES:
 if TRY:
     sp, steps = TRY.split("|", 1)
     print("#" * 80, "\nGERAÇÃO DE TESTE em", sp, flush=True)
-    c = Client(sp, hf_token=token, verbose=False)
+    c = make(sp)
     img = handle_file(os.path.join(os.path.dirname(__file__), "teste_foguete.png"))
     for step in json.loads(steps):
         args = [img if a == "$IMG" else a for a in step.get("args", [])]
